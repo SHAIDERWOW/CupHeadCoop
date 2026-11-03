@@ -35,6 +35,9 @@ namespace CupheadCoop
     {
         private static bool _sceneHooked;
         private static string _logPath = "CupheadCoop.log";
+        private static string _lastUnityErrorMsg = string.Empty;
+        private static int _unityErrorsLoggedInCurrentScene;
+        private const int MaxUnityErrorsPerScene = 40;
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static void InitializeEarly()
@@ -42,9 +45,10 @@ namespace CupheadCoop
             try
             {
                 _logPath = Path.GetFullPath("CupheadCoop.log");
-                Log("CupheadCoopBootstrapper.InitializeEarly() invoked by Doorstop!");
+                Log("CupheadCoopBootstrapper.InitializeEarly() invoked by Doorstop (v" + CoopProtocol.ModVersion + ")!");
 
                 AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
+                AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
 
                 foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
@@ -59,6 +63,15 @@ namespace CupheadCoop
             {
                 Log("InitializeEarly error: " + ex);
             }
+        }
+
+        private static void OnUnhandledException(object sender, UnhandledExceptionEventArgs args)
+        {
+            try
+            {
+                Log("[UNHANDLED EXCEPTION] " + (args != null && args.ExceptionObject != null ? args.ExceptionObject.ToString() : "Unknown"));
+            }
+            catch { }
         }
 
         private static void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)
@@ -88,7 +101,52 @@ namespace CupheadCoop
                 return;
             _sceneHooked = true;
             SceneManager.sceneLoaded += OnSceneLoaded;
-            Log("Hooked SceneManager.sceneLoaded successfully.");
+            Application.logMessageReceived += OnUnityLogMessageReceived;
+            Log("Hooked SceneManager.sceneLoaded and Application.logMessageReceived successfully.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void OnUnityLogMessageReceived(string condition, string stackTrace, LogType type)
+        {
+            try
+            {
+                if (type != LogType.Exception && type != LogType.Error && type != LogType.Assert)
+                    return;
+
+                if (_unityErrorsLoggedInCurrentScene >= MaxUnityErrorsPerScene)
+                    return;
+
+                string safeCond = condition ?? string.Empty;
+                if (safeCond == _lastUnityErrorMsg)
+                    return;
+
+                _lastUnityErrorMsg = safeCond;
+                _unityErrorsLoggedInCurrentScene++;
+
+                string sceneName = "unknown";
+                try { sceneName = SceneManager.GetActiveScene().name; } catch { }
+
+                string roleStr = "None";
+                uint tick = 0;
+                if (CoopModManager.Instance != null)
+                {
+                    if (CoopModManager.Instance.Transport != null)
+                        roleStr = CoopModManager.Instance.Transport.Role.ToString();
+                    if (CoopModManager.Instance.Sync != null)
+                        tick = CoopModManager.Instance.Sync.LocalTick;
+                }
+
+                Log(string.Format(
+                    "[UNITY {0}] [Scene={1} Role={2} Tick={3}] {4}{5}StackTrace: {6}",
+                    type,
+                    sceneName,
+                    roleStr,
+                    tick,
+                    safeCond,
+                    Environment.NewLine,
+                    (stackTrace ?? string.Empty).Trim()));
+            }
+            catch { }
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -96,6 +154,8 @@ namespace CupheadCoop
         {
             try
             {
+                _unityErrorsLoggedInCurrentScene = 0;
+                _lastUnityErrorMsg = string.Empty;
                 Log("OnSceneLoaded: " + scene.name);
                 CoopModManager.EnsureCreated();
                 if (CoopModManager.Instance != null)

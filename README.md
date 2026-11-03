@@ -22,18 +22,25 @@
 - **🌐 Built-in Steam P2P (No Port Forwarding):**
   - Connect directly through your Steam Friends list or by sharing a 1-click Lobby Code with hotkeys (`F5` / `F6`). No VPNs, no router port forwarding.
   - Also includes a Direct UDP mode for offline LAN play.
+- **🌐 Dynamic Regionalization (PT-BR / EN) & Update Checker:**
+  - Automatically matches your in-game language setting (Portuguese or English) across all menus and notices, with a manual quick-toggle button in the `F9` overlay.
+  - Silent, non-intrusive background check informs you when a new mod release is available on GitHub without impacting performance.
 - **🔄 Complete Gameplay Synchronization:**
-  - **Overworld & World Map:** Real-time movement, direction, walking animations, and Djimmi wish state.
-  - **Bosses & Timeline:** Synchronized boss health (`Level.Timeline.damage`), phase transitions, and deterministic RNG seeds.
+  - **Symmetric Level-Start Barrier (`LevelReadyGate`):** If one player's PC loads a boss stage faster than the other, the fight waits until both players finish loading so both timelines start on the exact same millisecond.
+  - **Shared In-Level Pause (`PauseSync`):** Pausing or unpausing during a level pauses/unpauses both players' screens simultaneously.
+  - **Two-Way Scene & Retry Controls (`SceneRequestSync`):** Either player (Host or Client) can trigger Retry/Restart, Return to Map, or enter a stage from the World Map.
+  - **In-Memory World Map & Dialoguer Mirror (`WorldSaveMirror`):** Mirrors the Host's World Map state (bridges, boss completion flags, NPC dialogues via `Dialoguer`) in the Client's RAM while protecting the Client's personal local save files on disk from being overwritten.
+  - **Bosses, Properties & Knockout Gate:** Synchronizes boss `AbstractLevelProperties` HP, timeline progress, phase transitions, deterministic RNG seeds, and a synchronized `KNOCKOUT!` gate (`LevelOutcomeSync`).
   - **Run & Gun Stages:** Coins (`LevelCoin`) collected by either player are awarded to both (`5/5`).
   - **King Dice Casino:** Board marker position, bonus hearts (`HEART_INDEXES`), and dice parry rolls (`DicePalaceMainLevelDice`) are strictly synced.
   - **Revive Mechanics:** Both ghost pink-heart parry revives (`OnParrySwitch`) and top-of-screen Steal-1-HP revives (`ReviveOutOfFrame`) work seamlessly online.
   - **Plane Levels (Shmup):** Syncs shooting, bombs, EX moves, parries, and mini-plane shrink state (`Shrink_In` / `Shrink_Out`).
   - **Real-Time Loadout & Inventory Mirroring:** Changing weapons or charms (e.g. Astral Cookie, Smoke Bomb, Cursed Relic) on the World Map or Game Over screen instantly updates for both players.
-- **🛡️ Anti-Softlock Protections:**
+- **🛡️ Anti-Softlock, DLC & Connection Protections:**
+  - **DLC & Version Handshake Guard:** Automatically checks mod version compatibility and whether both players have *The Delicious Last Course* DLC installed, preventing infinite loading screens or crashes if one player lacks the DLC.
+  - **Cold-Launch Steam Invites (`+connect_lobby`) & Auto-Reconnect:** Supports accepting Steam invites even while Cuphead is closed (waiting until local saves initialize before joining) and automatically reconnects up to 3 times if the P2P connection drops briefly.
   - Fixes vanilla multi-player menu soft-locks when closing the Equip Card (`MapEquipUI`) or exiting Porkrind's Shop (`ShopScene`).
   - Blocks accidental "Remove Player 2" clicks in the Pause menu during online sessions.
-  - Fast Same-Scene Retry/Restart sync on Boss Game Over and Pause menus.
 - **🧹 Clean & 100% Reversible:**
   - Built on Unity Doorstop. **Never modifies or overwrites your original game files**.
   - Effortless uninstallation: simply delete the 3 mod files to return to 100% vanilla anytime.
@@ -44,7 +51,7 @@
 
 > **Note:** Both you and your friend must have a legitimate copy of Cuphead on Steam.
 
-1. Download the latest `CupheadCoop-v1.0.zip` from the [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) page.
+1. Download the latest `CupheadCoop-v1.1.0.zip` from the [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) page.
 2. Extract the contents of the `.zip` directly into your Cuphead game folder:
    - Default Steam path: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verify that the following files are present in the folder next to `Cuphead.exe`:
@@ -90,6 +97,15 @@ If you or your friend want to remove the mod and return to pure vanilla Cuphead:
 | **`F9`** | Toggle in-game Mod Overlay & Mouse Cursor |
 | **`F5`** | Create Steam Lobby (when idle) / Open Steam Invite Overlay (when hosting) |
 | **`F6`** | Paste Lobby Code & Join (when idle) / Copy Lobby Code to Clipboard (when hosting) |
+
+---
+
+## 🐛 Bug Reporting & Diagnostics
+
+If you encounter any edge cases or desyncs during a boss fight:
+1. Locate `CupheadCoop.log` inside your Cuphead installation folder right after the session.
+2. Ask your co-op partner to grab their `CupheadCoop.log` as well.
+3. Open an issue on [GitHub Issues](https://github.com/SHAIDERWOW/CupHeadCoop/issues) and attach both log files.
 
 ---
 

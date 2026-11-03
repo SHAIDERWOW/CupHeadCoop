@@ -22,18 +22,25 @@
 - **🌐 Steam P2P Integrado (Sem Redirecionar Portas / Sem VPN):**
   - Conecte-se facilmente através da sua lista de amigos da Steam ou compartilhando um Código de Sala com atalhos de teclado (`F5` / `F6`). Sem Hamachi, sem Radmin e sem abrir portas no roteador.
   - Também inclui modo Direto por UDP para quem preferir jogar em LAN / rede local offline.
+- **🌐 Regionalização Dinâmica (PT-BR / EN) e Verificador de Atualizações:**
+  - Segue automaticamente o idioma configurado no seu Cuphead (Português do Brasil ou Inglês) em todos os textos e mensagens, com botão de troca manual no menu `F9`.
+  - Verificação silenciosa e assíncrona ao iniciar o jogo avisa se houver uma nova versão no GitHub sem causar quedas de FPS.
 - **🔄 Sincronização Completa da Gameplay:**
-  - **Mapa-Múndi:** Movimentação, direções, animações de caminhada e desejo de vida dobrada do Djimmi sincronizados.
-  - **Chefes e Linha do Tempo:** Vida do chefe sincronizada (`Level.Timeline.damage`), mudanças de fase sincronizadas e números aleatórios determinísticos por semente (RNG).
+  - **Portão de Início de Fase Sincronizado (`LevelReadyGate`):** Se o PC de um jogador carregar a fase antes do outro, a luta aguarda os dois terminarem a tela de loading para começar exatamente no mesmo milissegundo.
+  - **Pause Compartilhado (`PauseSync`):** Pausar ou despausar durante a luta pausa/despausa o jogo nos dois computadores ao mesmo tempo.
+  - **Comandos Bidirecionais (`SceneRequestSync`):** Qualquer um dos dois jogadores (Host ou Player 2) pode dar *Retry/Restart*, voltar ao Mapa ou iniciar fases pelo Mapa-Múndi.
+  - **Espelhamento do Mapa-Múndi em Memória RAM (`WorldSaveMirror`):** Sincroniza pontes abertas, bandeiras de chefes vencidos e diálogos de NPCs (`Dialoguer`) do Host na memória RAM do Cliente, **sem sobrescrever o arquivo de save pessoal do Cliente no HD**.
+  - **Chefes, Propriedades e Trava de Knockout:** Vida real do chefe (`AbstractLevelProperties`), linha do tempo, mudanças de fase, semente aleatória (RNG) e anúncio de `KNOCKOUT!` (`LevelOutcomeSync`) 100% sincronizados.
   - **Fases Run & Gun:** Moedas (`LevelCoin`) coletadas por qualquer um dos jogadores são computadas para ambos (`5/5`).
   - **Cassino do Rei Dado:** Posição no tabuleiro, casas com corações extras (`HEART_INDEXES`) e o resultado do parry no dado (`DicePalaceMainLevelDice`) sincronizados com precisão.
   - **Mecânicas de Reviver:** Tanto o parry no coração rosa do fantasma (`OnParrySwitch`) quanto o roubo de 1 HP do parceiro no topo da tela (`ReviveOutOfFrame`) funcionam perfeitamente no online.
   - **Fases de Avião (Shmup):** Disparos, bombas, ataques EX, Supers, parries e o estado de encolher em mini-avião (`Shrink_In` / `Shrink_Out`) totalmente sincronizados.
   - **Troca de Equipamentos em Tempo Real:** Trocar de armas ou amuletos (ex.: Biscoito Astral da Ms. Chalice, Smoke Bomb, Relíquia Amaldiçoada) no Mapa ou na tela de Game Over atualiza imediatamente para o outro jogador.
-- **🛡️ Proteção Contra Travamentos de Menus (Anti-Softlock):**
+- **🛡️ Proteções Anti-Softlock, DLC e Conexão:**
+  - **Verificação de DLC e Versão no Handshake:** Detecta automaticamente se ambos têm a DLC *The Delicious Last Course* e a mesma versão do mod, bloqueando carregamentos inválidos para **evitar tela de loading infinita** caso um jogador não tenha a DLC.
+  - **Convite com Jogo Fechado (`+connect_lobby`) e Reconexão Automática:** Aceita convites da Steam mesmo com o jogo fechado (aguardando os saves carregarem antes de conectar) e tenta reconectar sozinho até 3 vezes se a conexão oscilar.
   - Corrige travamentos nativos do jogo ao fechar a tela de equipamentos (`MapEquipUI`) ou ao sair da loja do Porkrind (`ShopScene`).
   - Bloqueia cliques acidentais na opção "Remover Jogador 2" no menu de Pause durante a partida online.
-  - Sincronização rápida de *Retry/Restart* imediato na tela de Game Over e de Pause.
 - **🧹 Limpo e 100% Reversível:**
   - Carregado via Unity Doorstop. **Nunca altera nem substitui os arquivos originais do seu Cuphead**.
   - Desinstalação simples e limpa: basta apagar os 3 arquivos do mod para voltar ao jogo 100% vanilla a qualquer momento.
@@ -44,7 +51,7 @@
 
 > **Observação:** Você e seu amigo precisam ter o jogo Cuphead original na Steam.
 
-1. Baixe o arquivo `CupheadCoop-v1.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases).
+1. Baixe o arquivo `CupheadCoop-v1.1.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases).
 2. Extraia o conteúdo do arquivo `.zip` diretamente dentro da pasta de instalação do seu Cuphead:
    - Caminho padrão da Steam: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verifique se os arquivos abaixo estão na pasta junto com o `Cuphead.exe`:
@@ -90,6 +97,15 @@ Se você ou seu amigo quiserem remover o mod:
 | **`F9`** | Abre/fecha o Menu do Mod e o cursor do mouse |
 | **`F5`** | Cria a Sala Steam (se estiver desconectado) / Abre o convite de amigos da Steam (se for Host) |
 | **`F6`** | Cola o código da sala da área de transferência e entra / Copia o código da sala atual (se for Host) |
+
+---
+
+## 🐛 Como Reportar Bugs e Diagnósticos
+
+Se você encontrar algum bug raro ou dessincronia durante uma luta de chefe:
+1. Localize o arquivo `CupheadCoop.log` dentro da pasta onde o Cuphead está instalado logo após a partida.
+2. Peça para o seu amigo que jogou junto pegar também o `CupheadCoop.log` dele.
+3. Abra uma issue no [GitHub Issues](https://github.com/SHAIDERWOW/CupHeadCoop/issues) e anexe ambos os arquivos de log.
 
 ---
 

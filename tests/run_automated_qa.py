@@ -45,7 +45,11 @@ def bridge_cmd(cmd: str, timeout: float = 5.0) -> dict:
 
 
 def build_handshake_payload(epoch: int = 1, rng_seed: int = 424242) -> bytes:
-    return struct.pack("<BIIiiiii", 1, 1, epoch, rng_seed, 1456773641, 0, 1456815409, 1522153206)
+    # PacketType.Handshake = 1, ProtocolVersion = 2, epoch, rng_seed, pWep, sWep, super, charm, hasDlc=1, stage=0 (Hello), version="1.1.0"
+    return (
+        struct.pack("<BIIiiiiiBB", 1, 2, epoch, rng_seed, 1456773641, 0, 1456815409, 1522153206, 1, 0)
+        + b"\x051.1.0"
+    )
 
 
 def build_achievement_sync_payload(ach_id: str) -> bytes:
@@ -192,15 +196,25 @@ def main() -> int:
         assert abs(players_after["p2x"] - (-125.0)) < 1.0, f"Expected p2x near -125.0, got {players_after['p2x']}"
         assert players_after["p2Shooting"] is True, "Expected p2Shooting=true after WeaponAction BasicStart"
 
-        # 7. Verify Edge Cases (Pause Player2Leave protection, Live LoadoutSync, Shared InventorySync, KingDice & Steal-HP Revive packets)
+        # 7. Verify Edge Cases & All 8 v1.1.0 Multiplayer Sync Improvements
         edge = bridge_cmd("verify_edge_cases")
-        print(f"[QA] Step 7 PASS — Edge-Case Subsystems Verified: {json.dumps(edge)}")
+        print(f"[QA] Step 7 PASS — Edge-Case & v1.1.0 Subsystems Verified: {json.dumps(edge)}")
         assert edge.get("ok") is True, f"Expected ok=True, got {edge}"
         assert edge.get("pauseLeaveProtected") is True, "Expected Pause Player2Leave protection to keep Multiplayer=true"
         assert edge.get("loadoutSynced") is True, "Expected real-time LoadoutSync to update PlayerTwo loadout (including Ms. Chalice)"
         assert edge.get("inventorySynced") is True, "Expected InventorySync to mirror unlocked weapons/supers/charms and currency"
         assert edge.get("kdPacketValid") is True, "Expected King Dice board sync packet valid"
         assert edge.get("eventsValid") is True, "Expected Steal-HP & CoinCollected packets valid"
+        assert edge.get("levelReadyGateVerified") is True, "Expected LevelReadyGate barrier to pause and release on partner ready"
+        assert edge.get("pauseSyncVerified") is True, "Expected PauseSync to pause and unpause gameplay across peers"
+        assert edge.get("sceneRequestVerified") is True, "Expected SceneRequest packet for Guest-initiated retry/exit/entry"
+        assert edge.get("worldSaveMirrorVerified") is True, "Expected WorldSaveMirror + Dialoguer in-RAM sync with disk save protection"
+        assert edge.get("dlcAndVersionGuardVerified") is True, "Expected DLC & Version mismatch guard to sanitize DLC loadouts and detect DLC scenes"
+        assert edge.get("coldLaunchInviteVerified") is True, "Expected +connect_lobby cold-launch invite queue & save-init guard"
+        assert edge.get("autoReconnectVerified") is True, "Expected 3x Auto-Reconnect arming on unexpected connection drop"
+        assert edge.get("knockoutGateVerified") is True, "Expected Knockout Gate & LevelWin sync packet"
+        assert edge.get("localizationVerified") is True, "Expected dynamic PT-BR / EN localization detection & manual toggle"
+        assert edge.get("updateCheckParserVerified") is True, "Expected GitHub release JSON parser & version comparator"
 
         print("RESULT: PASS")
         return 0

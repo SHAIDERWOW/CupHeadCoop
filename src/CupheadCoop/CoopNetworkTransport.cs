@@ -14,6 +14,10 @@ namespace CupheadCoop
         private const byte UdpFlagReliable = 0x80;
         private const byte UdpFlagUnreliable = 0x00;
 
+        private const int MaxAutoReconnectAttempts = 3;
+        private const double AutoReconnectIntervalSeconds = 3.0;
+        private const double SteamTimeoutSeconds = 15.0;
+
         public CoopRole Role { get; private set; }
         public bool IsConnected { get; private set; }
         public bool UsingSteamP2P { get; private set; }
@@ -21,7 +25,9 @@ namespace CupheadCoop
         public CSteamID RemoteSteamId { get; private set; }
         public IPEndPoint RemoteUdpEndPoint { get; private set; }
         public float LastRttMs { get; private set; }
-        public string StatusMessage { get; private set; }
+        public string StatusMessage { get; set; }
+        public ulong PendingInviteLobbyId { get { return _pendingLobbyJoinId; } }
+        public int AutoReconnectAttemptsLeft { get { return _autoReconnectAttemptsLeft; } }
 
         public event Action<byte[]> OnPacketReceived;
         public event Action OnPeerConnected;
@@ -31,6 +37,17 @@ namespace CupheadCoop
         private uint _nextReliableSeq = 1;
         private readonly HashSet<uint> _receivedReliableSeqs = new HashSet<uint>();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliables = new Dictionary<uint, PendingReliablePacket>();
+
+        // Cold-launch (+connect_lobby) & Save-Init Guard state
+        private ulong _pendingLobbyJoinId;
+        private string _pendingLobbyJoinSource = string.Empty;
+
+        // Auto-reconnect state
+        private ulong _lastJoinedLobbyId;
+        private int _autoReconnectAttemptsLeft;
+        private DateTime _nextAutoReconnectUtc = DateTime.MinValue;
+        private bool _suppressAutoReconnect;
+        private DateTime _lastPacketReceivedUtc = DateTime.UtcNow;
 
         // Steamworks callbacks (kept alive as fields so GC never collects them)
         private CallResult<LobbyCreated_t> _lobbyCreatedCallResult;
@@ -108,6 +125,22 @@ namespace CupheadCoop
             }
         }
 
+        /// <summary>
+        /// Queues a Steam Lobby ID (from +connect_lobby command line or Steam Overlay invite)
+        /// and waits until Steam is initialized and PlayerData.Initialized is true before joining.
+        /// </summary>
+        public void QueuePendingLobbyJoin(ulong lobbyIdULong, string source)
+        {
+            if (lobbyIdULong == 0)
+                return;
+
+            _pendingLobbyJoinId = lobbyIdULong;
+            _pendingLobbyJoinSource = source ?? "Steam Invite";
+            _suppressAutoReconnect = false;
+            StatusMessage = "Convite recebido (" + _pendingLobbyJoinSource + ")! Aguardando saves carregarem...";
+            CupheadCoopBootstrapper.Log("Queued pending lobby join: " + lobbyIdULong + " from " + _pendingLobbyJoinSource);
+        }
+
         public void HostSteamLobby()
         {
             EnsureSteamCallbacks();
@@ -117,7 +150,9 @@ namespace CupheadCoop
                 return;
             }
 
-            Disconnect();
+            _suppressAutoReconnect = false;
+            _autoReconnectAttemptsLeft = 0;
+            DisconnectInternal(false);
             Role = CoopRole.Host;
             UsingSteamP2P = true;
             StatusMessage = "Creating Steam Friend Lobby...";
@@ -135,11 +170,19 @@ namespace CupheadCoop
 
         public void JoinSteamLobby(ulong lobbyIdULong)
         {
-            EnsureSteamCallbacks();
-            if (!IsSteamInitialized())
+            if (lobbyIdULong == 0)
                 return;
 
-            Disconnect();
+            if (!IsSteamInitialized() || !PlayerData.Initialized)
+            {
+                QueuePendingLobbyJoin(lobbyIdULong, "JoinSteamLobby");
+                return;
+            }
+
+            EnsureSteamCallbacks();
+            _suppressAutoReconnect = false;
+            _lastJoinedLobbyId = lobbyIdULong;
+            DisconnectInternal(false);
             Role = CoopRole.Client;
             UsingSteamP2P = true;
             CSteamID lobbyId = new CSteamID(lobbyIdULong);
@@ -149,7 +192,9 @@ namespace CupheadCoop
 
         public void HostUdp(int port)
         {
-            Disconnect();
+            _suppressAutoReconnect = true;
+            _autoReconnectAttemptsLeft = 0;
+            DisconnectInternal(false);
             try
             {
                 _udpClient = new UdpClient(new IPEndPoint(IPAddress.Any, port));
@@ -169,7 +214,9 @@ namespace CupheadCoop
 
         public void JoinUdp(string hostIp, int port)
         {
-            Disconnect();
+            _suppressAutoReconnect = true;
+            _autoReconnectAttemptsLeft = 0;
+            DisconnectInternal(false);
             try
             {
                 _udpClient = new UdpClient(0);
@@ -178,6 +225,7 @@ namespace CupheadCoop
                 Role = CoopRole.Client;
                 UsingSteamP2P = false;
                 IsConnected = true;
+                _lastPacketReceivedUtc = DateTime.UtcNow;
                 StatusMessage = "Connected (UDP Client -> " + RemoteUdpEndPoint + ")";
                 CupheadCoopBootstrapper.Log(StatusMessage);
                 if (OnPeerConnected != null)
@@ -190,7 +238,24 @@ namespace CupheadCoop
             }
         }
 
+        public void RejectIncompatiblePeer(string reason)
+        {
+            _suppressAutoReconnect = true;
+            _autoReconnectAttemptsLeft = 0;
+            DisconnectInternal(false);
+            StatusMessage = reason;
+            CupheadCoopBootstrapper.Log("Rejected incompatible peer: " + reason);
+        }
+
         public void Disconnect()
+        {
+            _suppressAutoReconnect = true;
+            _autoReconnectAttemptsLeft = 0;
+            _pendingLobbyJoinId = 0;
+            DisconnectInternal(true);
+        }
+
+        private void DisconnectInternal(bool updateStatusToDisconnected)
         {
             bool wasConnected = IsConnected;
             IsConnected = false;
@@ -220,10 +285,63 @@ namespace CupheadCoop
 
             _pendingReliables.Clear();
             _receivedReliableSeqs.Clear();
-            StatusMessage = "Disconnected";
+            if (updateStatusToDisconnected)
+                StatusMessage = "Disconnected";
 
             if (wasConnected && OnPeerDisconnected != null)
                 OnPeerDisconnected();
+        }
+
+        public void HandleUnexpectedPeerDrop(string reason)
+        {
+            bool wasConnected = IsConnected;
+            CupheadCoopBootstrapper.Log(string.Format(
+                "[NetDiag] Unexpected peer drop: reason='{0}', role={1}, wasConnected={2}, rttMs={3:F1}, pendingReliables={4}, lobby={5}",
+                reason ?? "unknown",
+                Role,
+                wasConnected,
+                LastRttMs,
+                _pendingReliables.Count,
+                CurrentLobbyId.m_SteamID));
+            IsConnected = false;
+
+            if (UsingSteamP2P && IsSteamInitialized() && RemoteSteamId.IsValid())
+            {
+                try { SteamNetworking.CloseP2PSessionWithUser(RemoteSteamId); } catch { }
+            }
+            RemoteSteamId = CSteamID.Nil;
+            _pendingReliables.Clear();
+            _receivedReliableSeqs.Clear();
+
+            if (Role == CoopRole.Host && UsingSteamP2P && CurrentLobbyId.IsValid())
+            {
+                // Host keeps the lobby open so the Client can auto-reconnect seamlessly
+                StatusMessage = "Parceiro caiu (" + reason + "). Sala aberta aguardando reconexao...";
+                CupheadCoopBootstrapper.Log(StatusMessage);
+                return;
+            }
+
+            if (Role == CoopRole.Client && UsingSteamP2P && _lastJoinedLobbyId != 0 && !_suppressAutoReconnect)
+            {
+                _autoReconnectAttemptsLeft = MaxAutoReconnectAttempts;
+                _nextAutoReconnectUtc = DateTime.UtcNow.AddSeconds(AutoReconnectIntervalSeconds);
+                StatusMessage = "Conexao oscilou (" + reason + "). Reconectando sozinho (" + _autoReconnectAttemptsLeft + "x)...";
+                CupheadCoopBootstrapper.Log(StatusMessage);
+                return;
+            }
+
+            if (wasConnected && OnPeerDisconnected != null)
+                OnPeerDisconnected();
+        }
+
+        public void TriggerSimulatedDropForTest()
+        {
+            _suppressAutoReconnect = false;
+            _lastJoinedLobbyId = 123456789UL;
+            UsingSteamP2P = true;
+            Role = CoopRole.Client;
+            IsConnected = true;
+            HandleUnexpectedPeerDrop("SimulatedDrop");
         }
 
         public void Send(byte[] payload, bool reliable)
@@ -287,10 +405,40 @@ namespace CupheadCoop
         {
             EnsureSteamCallbacks();
 
+            // 1. Process pending cold-launch (+connect_lobby) or Steam Overlay invite once PlayerData is initialized
+            if (_pendingLobbyJoinId != 0 && IsSteamInitialized() && PlayerData.Initialized)
+            {
+                ulong targetLobby = _pendingLobbyJoinId;
+                _pendingLobbyJoinId = 0;
+                CupheadCoopBootstrapper.Log("PlayerData initialized! Executing queued lobby join for " + targetLobby);
+                JoinSteamLobby(targetLobby);
+            }
+
+            // 2. Process Client Auto-Reconnect timer if a live Steam session dropped unexpectedly
+            if (!IsConnected && _autoReconnectAttemptsLeft > 0 && !_suppressAutoReconnect && DateTime.UtcNow >= _nextAutoReconnectUtc)
+            {
+                int attemptNum = MaxAutoReconnectAttempts - _autoReconnectAttemptsLeft + 1;
+                _autoReconnectAttemptsLeft--;
+                _nextAutoReconnectUtc = DateTime.UtcNow.AddSeconds(AutoReconnectIntervalSeconds + 2.0);
+                if (IsSteamInitialized() && _lastJoinedLobbyId != 0)
+                {
+                    int remaining = _autoReconnectAttemptsLeft;
+                    StatusMessage = "Reconectando a sala Steam (tentativa " + attemptNum + "/" + MaxAutoReconnectAttempts + ")...";
+                    CupheadCoopBootstrapper.Log(StatusMessage);
+                    JoinSteamLobby(_lastJoinedLobbyId);
+                    _autoReconnectAttemptsLeft = remaining;
+                }
+            }
+
             if (UsingSteamP2P && IsSteamInitialized())
             {
                 PollSteamChannel(SteamChannelUnreliable);
                 PollSteamChannel(SteamChannelReliable);
+
+                if (IsConnected && (DateTime.UtcNow - _lastPacketReceivedUtc).TotalSeconds > SteamTimeoutSeconds)
+                {
+                    HandleUnexpectedPeerDrop("Timeout 15s");
+                }
             }
             else if (_udpClient != null)
             {
@@ -309,10 +457,12 @@ namespace CupheadCoop
                 CSteamID senderId;
                 if (SteamNetworking.ReadP2PPacket(buffer, msgSize, out bytesRead, out senderId, channel))
                 {
+                    _lastPacketReceivedUtc = DateTime.UtcNow;
                     if (!RemoteSteamId.IsValid() && senderId != SteamUser.GetSteamID())
                     {
                         RemoteSteamId = senderId;
                         IsConnected = true;
+                        _autoReconnectAttemptsLeft = 0;
                         StatusMessage = "Connected via Steam P2P (" + SteamFriends.GetFriendPersonaName(senderId) + ")";
                         if (OnPeerConnected != null)
                             OnPeerConnected();
@@ -332,6 +482,8 @@ namespace CupheadCoop
                     byte[] datagram = _udpClient.Receive(ref sender);
                     if (datagram == null || datagram.Length < 2)
                         continue;
+
+                    _lastPacketReceivedUtc = DateTime.UtcNow;
 
                     if (Role == CoopRole.Host && (RemoteUdpEndPoint == null || !RemoteUdpEndPoint.Equals(sender)))
                     {
@@ -430,6 +582,7 @@ namespace CupheadCoop
 
         public void InjectTestPayload(byte[] payload)
         {
+            _lastPacketReceivedUtc = DateTime.UtcNow;
             if (!IsConnected)
             {
                 IsConnected = true;
@@ -443,6 +596,8 @@ namespace CupheadCoop
         {
             if (payload == null || payload.Length == 0)
                 return;
+
+            _lastPacketReceivedUtc = DateTime.UtcNow;
 
             PacketType pType = (PacketType)payload[0];
             if (pType == PacketType.Ping && payload.Length >= 9)
@@ -480,7 +635,14 @@ namespace CupheadCoop
         private void OnSteamGameLobbyJoinRequested(GameLobbyJoinRequested_t param)
         {
             CupheadCoopBootstrapper.Log("Steam Overlay Join requested for lobby " + param.m_steamIDLobby.m_SteamID);
-            JoinSteamLobby(param.m_steamIDLobby.m_SteamID);
+            if (!PlayerData.Initialized)
+            {
+                QueuePendingLobbyJoin(param.m_steamIDLobby.m_SteamID, "Steam Overlay Invite");
+            }
+            else
+            {
+                JoinSteamLobby(param.m_steamIDLobby.m_SteamID);
+            }
         }
 
         private void OnSteamLobbyEntered(LobbyEnter_t param)
@@ -493,6 +655,8 @@ namespace CupheadCoop
                 {
                     RemoteSteamId = owner;
                     IsConnected = true;
+                    _autoReconnectAttemptsLeft = 0;
+                    _lastPacketReceivedUtc = DateTime.UtcNow;
                     StatusMessage = "Connected to Host (" + SteamFriends.GetFriendPersonaName(owner) + ")";
                     CupheadCoopBootstrapper.Log(StatusMessage);
                     if (OnPeerConnected != null)
@@ -513,6 +677,8 @@ namespace CupheadCoop
                 RemoteSteamId = changedUser;
                 SteamNetworking.AcceptP2PSessionWithUser(changedUser);
                 IsConnected = true;
+                _autoReconnectAttemptsLeft = 0;
+                _lastPacketReceivedUtc = DateTime.UtcNow;
                 StatusMessage = "Friend joined (" + SteamFriends.GetFriendPersonaName(changedUser) + ")";
                 CupheadCoopBootstrapper.Log(StatusMessage);
                 if (OnPeerConnected != null)
@@ -522,11 +688,7 @@ namespace CupheadCoop
             {
                 if (changedUser == RemoteSteamId)
                 {
-                    IsConnected = false;
-                    RemoteSteamId = CSteamID.Nil;
-                    StatusMessage = "Friend disconnected from lobby.";
-                    if (OnPeerDisconnected != null)
-                        OnPeerDisconnected();
+                    HandleUnexpectedPeerDrop("Parceiro saiu da sala");
                 }
             }
         }
@@ -538,6 +700,8 @@ namespace CupheadCoop
             {
                 RemoteSteamId = param.m_steamIDRemote;
                 IsConnected = true;
+                _autoReconnectAttemptsLeft = 0;
+                _lastPacketReceivedUtc = DateTime.UtcNow;
                 StatusMessage = "Connected via Steam P2P (" + SteamFriends.GetFriendPersonaName(RemoteSteamId) + ")";
                 if (OnPeerConnected != null)
                     OnPeerConnected();
@@ -546,8 +710,12 @@ namespace CupheadCoop
 
         private void OnSteamP2PConnectFail(P2PSessionConnectFail_t param)
         {
-            StatusMessage = "Steam P2P Error: " + (EP2PSessionError)param.m_eP2PSessionError;
-            CupheadCoopBootstrapper.Log(StatusMessage);
+            string errName = ((EP2PSessionError)param.m_eP2PSessionError).ToString();
+            CupheadCoopBootstrapper.Log("Steam P2P Error: " + errName);
+            if (param.m_steamIDRemote == RemoteSteamId || !RemoteSteamId.IsValid())
+            {
+                HandleUnexpectedPeerDrop("P2P " + errName);
+            }
         }
     }
 }

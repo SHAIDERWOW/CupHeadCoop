@@ -20,6 +20,7 @@ namespace CupheadCoop
         public string LastUnlockedAchievement { get; private set; }
         public static string OverrideSaveDirectory { get; set; }
         public static bool TestModeNoSteamWrite { get; set; }
+        public static bool SuppressClientDiskSave { get; set; }
         private readonly List<string> _unlockedHistory = new List<string>();
 
         public IList<string> UnlockedHistory
@@ -213,6 +214,12 @@ namespace CupheadCoop
 
         public void SaveCloudData(IDictionary<string, string> data, SaveCloudDataHandler handler)
         {
+            if (SuppressClientDiskSave && string.IsNullOrEmpty(OverrideSaveDirectory))
+            {
+                // Protect the Client's personal local save files on disk while mirroring the Host's World Map in RAM.
+                if (handler != null) handler(true);
+                return;
+            }
             if (!string.IsNullOrEmpty(OverrideSaveDirectory))
             {
                 try

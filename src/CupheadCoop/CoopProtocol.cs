@@ -24,7 +24,25 @@ namespace CupheadCoop
         SaveProgressSync = 9,
         LoadoutSync = 10,
         InventorySync = 11,
+        HandshakeReject = 12,
+        SceneRequest = 13,
+        WorldSaveMirrorChunk = 14,
         UdpAck = 250
+    }
+
+    public enum HandshakeStage : byte
+    {
+        Hello = 0,
+        Welcome = 1,
+        Ready = 2
+    }
+
+    public enum SceneRequestKind : byte
+    {
+        LoadScene = 1,
+        LoadLevel = 2,
+        ReloadLevel = 3,
+        LoadLastMap = 4
     }
 
     public enum WeaponActionType : byte
@@ -50,7 +68,9 @@ namespace CupheadCoop
         KingDiceRoll = 10,
         KingDiceBoardSync = 11,
         CoinCollected = 12,
-        DjimmiActivated = 13
+        DjimmiActivated = 13,
+        LevelReady = 14,
+        PauseSync = 15
     }
 
     public enum AchievementSyncKind : byte
@@ -147,12 +167,22 @@ namespace CupheadCoop
 
     public static class CoopProtocol
     {
-        public const uint ProtocolVersion = 1;
+        public const uint ProtocolVersion = 2;
+        public const string ModVersion = "1.1.0";
 
-        public static byte[] BuildHandshake(uint epoch, int rngSeed, int primaryWeapon, int secondaryWeapon, int superId, int charmId)
+        public static byte[] BuildHandshake(
+            uint epoch,
+            int rngSeed,
+            int primaryWeapon,
+            int secondaryWeapon,
+            int superId,
+            int charmId,
+            bool hasDlc = true,
+            HandshakeStage stage = HandshakeStage.Hello,
+            string modVersion = ModVersion)
         {
-            using (MemoryStream ms = new MemoryStream(32))
-            using (BinaryWriter bw = new BinaryWriter(ms))
+            using (MemoryStream ms = new MemoryStream(48))
+            using (BinaryWriter bw = new BinaryWriter(ms, Encoding.UTF8))
             {
                 bw.Write((byte)PacketType.Handshake);
                 bw.Write(ProtocolVersion);
@@ -162,6 +192,52 @@ namespace CupheadCoop
                 bw.Write(secondaryWeapon);
                 bw.Write(superId);
                 bw.Write(charmId);
+                bw.Write(hasDlc);
+                bw.Write((byte)stage);
+                bw.Write(modVersion ?? ModVersion);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildHandshakeReject(uint localProto, string localModVersion, string reason)
+        {
+            using (MemoryStream ms = new MemoryStream(96))
+            using (BinaryWriter bw = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                bw.Write((byte)PacketType.HandshakeReject);
+                bw.Write(localProto);
+                bw.Write(localModVersion ?? ModVersion);
+                bw.Write(reason ?? "Incompatible mod version.");
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildSceneRequest(SceneRequestKind kind, string sceneName, int levelId, int difficultyMode)
+        {
+            using (MemoryStream ms = new MemoryStream(64))
+            using (BinaryWriter bw = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                bw.Write((byte)PacketType.SceneRequest);
+                bw.Write((byte)kind);
+                bw.Write(sceneName ?? string.Empty);
+                bw.Write(levelId);
+                bw.Write(difficultyMode);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildWorldSaveMirrorChunk(ushort mirrorId, byte slotIndex, ushort chunkIndex, ushort totalChunks, byte[] chunkData, int offset, int count)
+        {
+            using (MemoryStream ms = new MemoryStream(count + 16))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)PacketType.WorldSaveMirrorChunk);
+                bw.Write(mirrorId);
+                bw.Write(slotIndex);
+                bw.Write(chunkIndex);
+                bw.Write(totalChunks);
+                bw.Write((ushort)count);
+                bw.Write(chunkData, offset, count);
                 return ms.ToArray();
             }
         }
