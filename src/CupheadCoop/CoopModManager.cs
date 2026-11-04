@@ -675,8 +675,110 @@ namespace CupheadCoop
                     && !IsRemoteVersionNewer("1.1.0", "1.1.0")
                     && !IsRemoteVersionNewer("1.1.0", "1.0.0");
 
+                // Fix #1 (v1.1.1): Map Bridge Refresh (empty _levels preserved + completed _levels enabled)
+                bool mapBridgeRefreshVerified = false;
+                if (PlayerData.Initialized && PlayerData.Data != null)
+                {
+                    GameObject testRoot = new GameObject("CoopTestBridgeObstacle");
+                    GameObject toEnable = new GameObject("BridgeEnable");
+                    GameObject toDisable = new GameObject("BridgeDisable");
+                    toEnable.transform.SetParent(testRoot.transform);
+                    toDisable.transform.SetParent(testRoot.transform);
+                    toEnable.SetActive(true);
+                    toDisable.SetActive(false);
+
+                    MapLevelDependentObstacle obs = testRoot.AddComponent<MapLevelDependentObstacle>();
+                    var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    typeof(MapLevelDependentObstacle).GetField("ToEnable", flags).SetValue(obs, toEnable);
+                    typeof(MapLevelDependentObstacle).GetField("ToDisable", flags).SetValue(obs, toDisable);
+                    typeof(AbstractMapLevelDependentEntity).GetField("_levels", flags).SetValue(obs, new Levels[0]);
+
+                    // Empty _levels (like the World 1 start bridge) must remain enabled
+                    CoopSyncController.RefreshMapObstacles(true);
+                    bool emptyLevelsPreserved = toEnable.activeSelf && !toDisable.activeSelf;
+
+                    // Completed level obstacle must transition to enabled state
+                    var vegData = PlayerData.Data.GetLevelData(Levels.Veggies);
+                    bool origCompleted = vegData.completed;
+                    vegData.completed = true;
+                    toEnable.SetActive(false);
+                    toDisable.SetActive(true);
+                    typeof(AbstractMapLevelDependentEntity).GetField("_levels", flags).SetValue(obs, new Levels[] { Levels.Veggies });
+                    CoopSyncController.RefreshMapObstacles(true);
+                    bool completedLevelEnabled = toEnable.activeSelf && !toDisable.activeSelf;
+                    vegData.completed = origCompleted;
+
+                    DestroyImmediate(testRoot);
+                    mapBridgeRefreshVerified = emptyLevelsPreserved && completedLevelEnabled;
+                }
+
+                // Fix #2 (v1.1.1): No Duplicate Player Clone When Partner Is Dead
+                bool noDeadPlayerCloneVerified = false;
+                AbstractPlayerController p2Ctrl = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
+                if (p2Ctrl != null && p2Ctrl.stats != null)
+                {
+                    int origHp = p2Ctrl.stats.Health;
+                    p2Ctrl.stats.SetHealth(0); // Now p2Ctrl.IsDead == true and PlayerManager.DoesPlayerExist(PlayerTwo) == false
+                    bool doesExistWhileDead = PlayerManager.DoesPlayerExist(PlayerId.PlayerTwo);
+                    Sync.ForceMultiplayerPlayerTwoJoined();
+                    AbstractPlayerController[] allCtrls = FindObjectsOfType<AbstractPlayerController>();
+                    int p2Count = 0;
+                    for (int i = 0; i < allCtrls.Length; i++)
+                    {
+                        if (allCtrls[i] != null && allCtrls[i].id == PlayerId.PlayerTwo)
+                            p2Count++;
+                    }
+                    p2Ctrl.stats.SetHealth(origHp > 0 ? origHp : 3);
+                    noDeadPlayerCloneVerified = (!doesExistWhileDead && p2Count == 1);
+                }
+
+                // Fix #3 (v1.1.1): Remote Puppet Damage Guard & Death Event Sync
+                bool remoteDamageGuardAndDeathSyncVerified = false;
+                Sync.ConfigureLocalAndRemoteInputs();
+                AbstractPlayerController p1Ctrl = PlayerManager.GetPlayer(PlayerId.PlayerOne);
+                p2Ctrl = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
+                if (p1Ctrl != null && p2Ctrl != null && p1Ctrl.damageReceiver != null && p2Ctrl.damageReceiver != null && p1Ctrl.stats != null && p2Ctrl.stats != null)
+                {
+                    byte[] deathPkt = CoopProtocol.BuildLevelEvent(LevelEventType.PlayerDeath, (byte)PlayerId.PlayerTwo, 15f, 25f, 0);
+                    remoteDamageGuardAndDeathSyncVerified = p1Ctrl.damageReceiver.enabled
+                        && !CoopSyncController.GetPlayerHardInvincibility(p1Ctrl.stats)
+                        && !p2Ctrl.damageReceiver.enabled
+                        && CoopSyncController.GetPlayerHardInvincibility(p2Ctrl.stats)
+                        && deathPkt != null && deathPkt.Length >= 15;
+                }
+
+                // Fix #4 (v1.1.1): Deterministic Boss Attack Pattern RNG Sync
+                bool bossPatternRngSyncVerified = false;
+                if (Level.Current != null)
+                {
+                    bool synced1 = Sync.SynchronizeBossPropertiesRng(777777);
+                    var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly;
+                    System.Reflection.FieldInfo propsField = Level.Current.GetType().GetField("properties", flags);
+                    if (propsField != null)
+                    {
+                        object propsObj = propsField.GetValue(Level.Current);
+                        if (propsObj != null)
+                        {
+                            System.Reflection.PropertyInfo curStateProp = propsObj.GetType().GetProperty("CurrentState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                            object curState = curStateProp != null ? curStateProp.GetValue(propsObj, null) : null;
+                            if (curState != null && curState.GetType().BaseType != null)
+                            {
+                                System.Reflection.FieldInfo patIdxField = curState.GetType().BaseType.GetField("patternIndex", flags);
+                                if (patIdxField != null)
+                                {
+                                    int expectedIdx = (int)patIdxField.GetValue(curState);
+                                    patIdxField.SetValue(curState, 9999);
+                                    bool synced2 = Sync.SynchronizeBossPropertiesRng(777777);
+                                    int restoredIdx = (int)patIdxField.GetValue(curState);
+                                    bossPatternRngSyncVerified = synced1 && synced2 && restoredIdx == expectedIdx && restoredIdx != 9999;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 return string.Format(
-                    "{{\"ok\":true,\"pauseLeaveProtected\":{0},\"loadoutSynced\":{1},\"inventorySynced\":{2},\"kdPacketValid\":{3},\"eventsValid\":{4},\"levelReadyGateVerified\":{5},\"pauseSyncVerified\":{6},\"sceneRequestVerified\":{7},\"worldSaveMirrorVerified\":{8},\"dlcAndVersionGuardVerified\":{9},\"coldLaunchInviteVerified\":{10},\"autoReconnectVerified\":{11},\"knockoutGateVerified\":{12},\"localizationVerified\":{13},\"updateCheckParserVerified\":{14}}}",
+                    "{{\"ok\":true,\"pauseLeaveProtected\":{0},\"loadoutSynced\":{1},\"inventorySynced\":{2},\"kdPacketValid\":{3},\"eventsValid\":{4},\"levelReadyGateVerified\":{5},\"pauseSyncVerified\":{6},\"sceneRequestVerified\":{7},\"worldSaveMirrorVerified\":{8},\"dlcAndVersionGuardVerified\":{9},\"coldLaunchInviteVerified\":{10},\"autoReconnectVerified\":{11},\"knockoutGateVerified\":{12},\"localizationVerified\":{13},\"updateCheckParserVerified\":{14},\"mapBridgeRefreshVerified\":{15},\"noDeadPlayerCloneVerified\":{16},\"remoteDamageGuardAndDeathSyncVerified\":{17},\"bossPatternRngSyncVerified\":{18}}}",
                     pauseLeaveProtected ? "true" : "false",
                     loadoutSynced ? "true" : "false",
                     inventorySynced ? "true" : "false",
@@ -691,7 +793,11 @@ namespace CupheadCoop
                     autoReconnectVerified ? "true" : "false",
                     knockoutGateVerified ? "true" : "false",
                     localizationVerified ? "true" : "false",
-                    updateCheckParserVerified ? "true" : "false");
+                    updateCheckParserVerified ? "true" : "false",
+                    mapBridgeRefreshVerified ? "true" : "false",
+                    noDeadPlayerCloneVerified ? "true" : "false",
+                    remoteDamageGuardAndDeathSyncVerified ? "true" : "false",
+                    bossPatternRngSyncVerified ? "true" : "false");
             }
             catch (Exception ex)
             {

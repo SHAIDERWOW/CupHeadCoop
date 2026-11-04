@@ -168,7 +168,7 @@ namespace CupheadCoop
     public static class CoopProtocol
     {
         public const uint ProtocolVersion = 2;
-        public const string ModVersion = "1.1.0";
+        public const string ModVersion = "1.1.1";
 
         public static byte[] BuildHandshake(
             uint epoch,

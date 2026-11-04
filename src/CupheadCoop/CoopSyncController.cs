@@ -30,6 +30,7 @@ namespace CupheadCoop
         private float _lastSentBossPropertiesHp = -1f;
         private bool _applyingRemoteSceneLoad;
         private bool _applyingRemoteWeaponAction;
+        private bool _applyingRemoteDeath;
         private bool _wasLocalShooting;
         private bool _wasRemoteParrying;
         private bool _wasRemotePlaneShrunk;
@@ -170,7 +171,7 @@ namespace CupheadCoop
             if (_transport.Role == CoopRole.Host)
             {
                 _sessionEpoch++;
-                _currentRngSeed = Environment.TickCount ^ 0x5A17C9;
+                _currentRngSeed = (Math.Abs(Environment.TickCount ^ 0x5A17C9) & 0x007FFFFF) | 1;
                 UnityEngine.Random.InitState(_currentRngSeed);
             }
 
@@ -253,15 +254,6 @@ namespace CupheadCoop
                 }
             }
 
-            if (Level.Current != null && !IsMenuOrMapScene(sceneName))
-            {
-                BeginLevelReadyGate((int)Level.Current.CurrentLevel);
-            }
-            else
-            {
-                ReleaseLevelReadyGate();
-            }
-
             if (_transport.Role == CoopRole.Host && !_applyingRemoteSceneLoad && !string.IsNullOrEmpty(sceneName))
             {
                 if (sceneName != "scene_load_helper" && sceneName != "scene_cutscene_load")
@@ -276,13 +268,23 @@ namespace CupheadCoop
 
                     _lastSyncedScene = sceneName;
                     _sceneLoadSequence++;
-                    _currentRngSeed = Environment.TickCount ^ (sceneName.GetHashCode() + _sceneLoadSequence);
+                    _currentRngSeed = (Math.Abs(Environment.TickCount ^ (sceneName.GetHashCode() + _sceneLoadSequence)) & 0x007FFFFF) | 1;
                     UnityEngine.Random.InitState(_currentRngSeed);
 
                     int diffMode = Level.Current != null ? (int)Level.Current.mode : (int)Level.CurrentMode;
                     byte[] pkt = CoopProtocol.BuildSceneSync(sceneName, levelId, diffMode, _currentRngSeed, _sceneLoadSequence);
                     _transport.Send(pkt, true);
                 }
+            }
+
+            if (Level.Current != null && !IsMenuOrMapScene(sceneName))
+            {
+                SynchronizeBossPropertiesRng(_currentRngSeed);
+                BeginLevelReadyGate((int)Level.Current.CurrentLevel);
+            }
+            else
+            {
+                ReleaseLevelReadyGate();
             }
         }
 
@@ -362,7 +364,12 @@ namespace CupheadCoop
             if (_remoteReadyForLevelId == levelId)
             {
                 // Partner already finished loading this level; notify them and start immediately!
-                byte[] readyPkt = CoopProtocol.BuildLevelEvent(LevelEventType.LevelReady, (byte)GetLocalPlayerId(), _sceneLoadSequence, 0f, levelId);
+                byte[] readyPkt = CoopProtocol.BuildLevelEvent(
+                    LevelEventType.LevelReady,
+                    (byte)GetLocalPlayerId(),
+                    _sceneLoadSequence,
+                    _transport.Role == CoopRole.Host ? (float)_currentRngSeed : 0f,
+                    levelId);
                 _transport.Send(readyPkt, true);
                 ReleaseLevelReadyGate();
                 return;
@@ -389,7 +396,7 @@ namespace CupheadCoop
                         LevelEventType.LevelReady,
                         (byte)GetLocalPlayerId(),
                         _sceneLoadSequence,
-                        0f,
+                        _transport.Role == CoopRole.Host ? (float)_currentRngSeed : 0f,
                         currentLvlId);
                     _transport.Send(readyPkt, true);
                 }
@@ -425,6 +432,10 @@ namespace CupheadCoop
         public void ReleaseLevelReadyGate()
         {
             _waitingAtLevelReadyGate = false;
+            if (Level.Current != null)
+            {
+                SynchronizeBossPropertiesRng(_currentRngSeed);
+            }
             if (_gatePausedGameplay)
             {
                 _gatePausedGameplay = false;
@@ -432,6 +443,94 @@ namespace CupheadCoop
                 {
                     PauseManager.Unpause();
                 }
+            }
+        }
+
+        private static FieldInfo GetFieldInHierarchy(Type type, string fieldName)
+        {
+            for (Type t = type; t != null && t != typeof(object); t = t.BaseType)
+            {
+                FieldInfo fi = t.GetField(fieldName, AllFlags | BindingFlags.DeclaredOnly);
+                if (fi != null)
+                    return fi;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Ensures Level.Current.properties (whose State constructors run in Level.Awake() before OnSceneLoaded)
+        /// has identical attack patterns[] and patternIndex across both Host and Client, and resets PlayerManager.currentId.
+        /// </summary>
+        public bool SynchronizeBossPropertiesRng(int seed)
+        {
+            _currentRngSeed = (Math.Abs(seed) & 0x007FFFFF) | 1;
+            UnityEngine.Random.InitState(_currentRngSeed);
+
+            try
+            {
+                FieldInfo curIdField = typeof(PlayerManager).GetField("currentId", AllFlags);
+                if (curIdField != null)
+                {
+                    curIdField.SetValue(null, PlayerId.PlayerOne);
+                }
+            }
+            catch { }
+
+            if (Level.Current == null)
+                return false;
+
+            try
+            {
+                FieldInfo propsField = GetFieldInHierarchy(Level.Current.GetType(), "properties");
+                if (propsField == null)
+                    return false;
+
+                object existingProps = propsField.GetValue(Level.Current);
+                if (existingProps == null)
+                    return false;
+
+                Type propsType = existingProps.GetType();
+                MethodInfo getModeMethod = propsType.GetMethod("GetMode", AllFlags, null, new Type[] { typeof(Level.Mode) }, null);
+                if (getModeMethod == null)
+                    return false;
+
+                UnityEngine.Random.InitState(_currentRngSeed);
+                object freshProps = getModeMethod.Invoke(null, new object[] { Level.Current.mode });
+                if (freshProps == null)
+                    return false;
+
+                FieldInfo statesField = GetFieldInHierarchy(propsType, "states");
+                if (statesField != null)
+                {
+                    Array existingStates = statesField.GetValue(existingProps) as Array;
+                    Array freshStates = statesField.GetValue(freshProps) as Array;
+                    if (existingStates != null && freshStates != null && existingStates.Length == freshStates.Length)
+                    {
+                        for (int i = 0; i < existingStates.Length; i++)
+                        {
+                            object exState = existingStates.GetValue(i);
+                            object frState = freshStates.GetValue(i);
+                            if (exState == null || frState == null)
+                                continue;
+
+                            Type stType = exState.GetType();
+                            FieldInfo patField = GetFieldInHierarchy(stType, "patterns");
+                            FieldInfo patIdxField = GetFieldInHierarchy(stType, "patternIndex");
+                            if (patField != null)
+                                patField.SetValue(exState, patField.GetValue(frState));
+                            if (patIdxField != null)
+                                patIdxField.SetValue(exState, patIdxField.GetValue(frState));
+                        }
+                    }
+                }
+
+                UnityEngine.Random.InitState(_currentRngSeed ^ 0x3C6EF35F);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                CupheadCoopBootstrapper.Log("SynchronizeBossPropertiesRng warning: " + ex.Message);
+                return false;
             }
         }
 
@@ -888,20 +987,68 @@ namespace CupheadCoop
             }
         }
 
-        private static void RefreshMapObstacles()
+        public static void RefreshMapObstacles(bool allowWithoutMapForTest = false)
         {
-            if (Map.Current == null)
+            if ((!allowWithoutMapForTest && Map.Current == null) || !PlayerData.Initialized || PlayerData.Data == null)
                 return;
 
             try
             {
-                MapLevelDependentObstacle[] obstacles = UnityEngine.Object.FindObjectsOfType<MapLevelDependentObstacle>();
-                if (obstacles == null) return;
-                for (int i = 0; i < obstacles.Length; i++)
+                MethodInfo validateSuccess = typeof(AbstractMapLevelDependentEntity).GetMethod("ValidateSucess", AllFlags);
+                MethodInfo onAlreadyMet = typeof(AbstractMapLevelDependentEntity).GetMethod("OnConditionAlreadyMet", AllFlags);
+                MethodInfo onNotMet = typeof(AbstractMapLevelDependentEntity).GetMethod("OnConditionNotMet", AllFlags);
+                FieldInfo levelsField = typeof(AbstractMapLevelDependentEntity).GetField("_levels", AllFlags);
+
+                MapShmupTutorialBridgeActivator[] shmupBridges = UnityEngine.Object.FindObjectsOfType<MapShmupTutorialBridgeActivator>();
+                HashSet<int> shmupManagedIds = new HashSet<int>();
+                if (shmupBridges != null)
                 {
-                    if (obstacles[i] != null)
+                    FieldInfo bpField = typeof(MapShmupTutorialBridgeActivator).GetField("blueprintObstacle", AllFlags);
+                    for (int i = 0; i < shmupBridges.Length; i++)
                     {
-                        obstacles[i].OnChange();
+                        if (shmupBridges[i] == null || bpField == null)
+                            continue;
+                        MapLevelDependentObstacle bp = bpField.GetValue(shmupBridges[i]) as MapLevelDependentObstacle;
+                        if (bp != null)
+                        {
+                            shmupManagedIds.Add(bp.GetInstanceID());
+                            if (PlayerData.Data.IsFlyingTutorialCompleted)
+                            {
+                                if (onAlreadyMet != null) onAlreadyMet.Invoke(bp, null);
+                            }
+                            else
+                            {
+                                if (onNotMet != null) onNotMet.Invoke(bp, null);
+                            }
+                        }
+                    }
+                }
+
+                AbstractMapLevelDependentEntity[] entities = UnityEngine.Object.FindObjectsOfType<AbstractMapLevelDependentEntity>();
+                if (entities == null || validateSuccess == null || onAlreadyMet == null || onNotMet == null)
+                    return;
+
+                for (int i = 0; i < entities.Length; i++)
+                {
+                    AbstractMapLevelDependentEntity ent = entities[i];
+                    if (ent == null || shmupManagedIds.Contains(ent.GetInstanceID()))
+                        continue;
+
+                    if (levelsField != null)
+                    {
+                        Array lvls = levelsField.GetValue(ent) as Array;
+                        if (lvls == null || lvls.Length == 0)
+                            continue;
+                    }
+
+                    bool met = (bool)validateSuccess.Invoke(ent, null);
+                    if (met)
+                    {
+                        onAlreadyMet.Invoke(ent, null);
+                    }
+                    else
+                    {
+                        onNotMet.Invoke(ent, null);
                     }
                 }
             }
@@ -1007,7 +1154,7 @@ namespace CupheadCoop
 
             try
             {
-                FieldInfo propsField = current.GetType().GetField("properties", AllFlags);
+                FieldInfo propsField = GetFieldInHierarchy(current.GetType(), "properties");
                 if (propsField == null)
                     return false;
 
@@ -1017,11 +1164,11 @@ namespace CupheadCoop
 
                 Type propsType = propsObj.GetType();
                 _bossCurrentHealthProp = propsType.GetProperty("CurrentHealth", AllFlags);
-                _bossCurrentHealthBackingField = propsType.GetField("<CurrentHealth>k__BackingField", AllFlags);
-                _bossTotalHealthField = propsType.GetField("TotalHealth", AllFlags);
+                _bossCurrentHealthBackingField = GetFieldInHierarchy(propsType, "<CurrentHealth>k__BackingField");
+                _bossTotalHealthField = GetFieldInHierarchy(propsType, "TotalHealth");
                 _bossDealDamageMethod = propsType.GetMethod("DealDamage", AllFlags, null, new Type[] { typeof(float) }, null);
                 _bossWinInstantlyMethod = propsType.GetMethod("WinInstantly", AllFlags);
-                _bossStateIndexField = propsType.GetField("stateIndex", AllFlags);
+                _bossStateIndexField = GetFieldInHierarchy(propsType, "stateIndex");
 
                 if (_bossCurrentHealthProp != null && _bossDealDamageMethod != null)
                 {
@@ -1130,7 +1277,8 @@ namespace CupheadCoop
                 PlayerManager.Multiplayer = true;
 
                 // Prevent "Remove Player 2" in Pause Menu (which sets slot 1 joinState = Leaving = 4)
-                // and keep PlayerTwo slot marked as Joined (3) + UsingController (1)
+                // and keep PlayerTwo slot marked as Joined (3) + UsingController (1) with canJoin = false
+                // so PlayerManager.Update() never triggers a duplicate "PLAYER TWO JOINED" spawn on button press.
                 FieldInfo slotsField = typeof(PlayerManager).GetField("playerSlots", AllFlags);
                 if (slotsField != null)
                 {
@@ -1144,9 +1292,12 @@ namespace CupheadCoop
                             FieldInfo joinStateField = slotType.GetField("joinState", AllFlags);
                             FieldInfo ctrlStateField = slotType.GetField("controllerState", AllFlags);
                             FieldInfo canJoinField = slotType.GetField("canJoin", AllFlags);
+                            FieldInfo promptField = slotType.GetField("promptBeforeJoin", AllFlags);
 
                             if (canJoinField != null)
-                                canJoinField.SetValue(slot1, true);
+                                canJoinField.SetValue(slot1, false);
+                            if (promptField != null)
+                                promptField.SetValue(slot1, false);
                             if (joinStateField != null)
                                 joinStateField.SetValue(slot1, Enum.ToObject(joinStateField.FieldType, 3)); // Joined = 3
                             if (ctrlStateField != null)
@@ -1163,18 +1314,59 @@ namespace CupheadCoop
                         mapJoin.Invoke(Map.Current, new object[] { PlayerId.PlayerTwo });
                 }
 
-                // If in Level and PlayerTwo does not exist yet, spawn PlayerTwo in the Level
-                if (Level.Current != null && Level.Current.PlayersCreated && !PlayerManager.DoesPlayerExist(PlayerId.PlayerTwo) && PlayerManager.DoesPlayerExist(PlayerId.PlayerOne))
+                // IMPORTANT: Use PlayerManager.GetPlayer(...) == null instead of !PlayerManager.DoesPlayerExist(...)!
+                // DoesPlayerExist() returns false whenever a player is dead (IsDead == true), which previously caused
+                // Level.OnPlayerJoined(PlayerTwo) to spawn duplicate clones of PlayerTwo upon dying!
+                if (Level.Current != null && Level.Current.PlayersCreated && !Level.Current.Ending &&
+                    PlayerManager.GetPlayer(PlayerId.PlayerTwo) == null && PlayerManager.GetPlayer(PlayerId.PlayerOne) != null)
                 {
                     MethodInfo lvlJoin = typeof(Level).GetMethod("OnPlayerJoined", AllFlags);
                     if (lvlJoin != null)
                         lvlJoin.Invoke(Level.Current, new object[] { PlayerId.PlayerTwo });
                 }
+
+                CleanupDuplicatePlayerControllers();
             }
             catch (Exception ex)
             {
                 CupheadCoopBootstrapper.Log("ForceMultiplayerPlayerTwoJoined warning: " + ex.Message);
             }
+        }
+
+        public static int CleanupDuplicatePlayerControllers()
+        {
+            int removed = 0;
+            try
+            {
+                AbstractPlayerController canonicalP1 = PlayerManager.GetPlayer(PlayerId.PlayerOne);
+                AbstractPlayerController canonicalP2 = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
+                if (canonicalP1 == null && canonicalP2 == null)
+                    return 0;
+
+                AbstractPlayerController[] allControllers = UnityEngine.Object.FindObjectsOfType<AbstractPlayerController>();
+                if (allControllers == null || allControllers.Length <= 2)
+                    return 0;
+
+                for (int i = 0; i < allControllers.Length; i++)
+                {
+                    AbstractPlayerController ctrl = allControllers[i];
+                    if (ctrl == null)
+                        continue;
+
+                    if (ctrl.id == PlayerId.PlayerOne && canonicalP1 != null && ctrl != canonicalP1)
+                    {
+                        UnityEngine.Object.Destroy(ctrl.gameObject);
+                        removed++;
+                    }
+                    else if (ctrl.id == PlayerId.PlayerTwo && canonicalP2 != null && ctrl != canonicalP2)
+                    {
+                        UnityEngine.Object.Destroy(ctrl.gameObject);
+                        removed++;
+                    }
+                }
+            }
+            catch { }
+            return removed;
         }
 
         private static void SetPlayerInputActions(PlayerInput pInput, Player rewiredPlayer)
@@ -1213,6 +1405,11 @@ namespace CupheadCoop
                     SetPlayerInputActions(localCtrl.input, localRewiredPlayer);
                     HookLocalPlayerEvents(localCtrl);
 
+                    if (localCtrl.damageReceiver != null && !localCtrl.damageReceiver.enabled)
+                        localCtrl.damageReceiver.enabled = true;
+                    if (localCtrl.stats != null)
+                        SetPlayerHardInvincibility(localCtrl.stats, false);
+
                     LevelPlayerController localLvl = localCtrl as LevelPlayerController;
                     if (localLvl != null)
                     {
@@ -1238,6 +1435,14 @@ namespace CupheadCoop
                 if (remoteCtrl != null && remoteCtrl.input != null)
                 {
                     SetPlayerInputActions(remoteCtrl.input, unassignedRewiredPlayer);
+
+                    // Prevent the remote puppet from taking fake local collision/pit damage and dying locally
+                    // while the partner is still alive on their screen! Remote health & death are synced from the owner.
+                    if (remoteCtrl.damageReceiver != null && remoteCtrl.damageReceiver.enabled)
+                        remoteCtrl.damageReceiver.enabled = false;
+                    if (remoteCtrl.stats != null)
+                        SetPlayerHardInvincibility(remoteCtrl.stats, true);
+
                     LevelPlayerController remoteLvl = remoteCtrl as LevelPlayerController;
                     if (remoteLvl != null)
                     {
@@ -1395,14 +1600,45 @@ namespace CupheadCoop
                     return;
 
                 AbstractPlayerController p1 = PlayerManager.GetPlayer(PlayerId.PlayerOne);
-                if (p1 != null && p1.input != null)
-                    SetPlayerInputActions(p1.input, ReInput.players.GetPlayer(0));
+                if (p1 != null)
+                {
+                    if (p1.input != null)
+                        SetPlayerInputActions(p1.input, ReInput.players.GetPlayer(0));
+                    if (p1.damageReceiver != null)
+                        p1.damageReceiver.enabled = true;
+                    if (p1.stats != null)
+                        SetPlayerHardInvincibility(p1.stats, false);
+                }
 
                 AbstractPlayerController p2 = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
-                if (p2 != null && p2.input != null)
-                    SetPlayerInputActions(p2.input, ReInput.players.GetPlayer(1));
+                if (p2 != null)
+                {
+                    if (p2.input != null)
+                        SetPlayerInputActions(p2.input, ReInput.players.GetPlayer(1));
+                    if (p2.damageReceiver != null)
+                        p2.damageReceiver.enabled = true;
+                    if (p2.stats != null)
+                        SetPlayerHardInvincibility(p2.stats, false);
+                }
             }
             catch { }
+        }
+
+        public static void SetPlayerHardInvincibility(PlayerStatsManager stats, bool invincible)
+        {
+            if (stats == null)
+                return;
+            FieldInfo fi = typeof(PlayerStatsManager).GetField("hardInvincibility", AllFlags);
+            if (fi != null)
+                fi.SetValue(stats, invincible);
+        }
+
+        public static bool GetPlayerHardInvincibility(PlayerStatsManager stats)
+        {
+            if (stats == null)
+                return false;
+            FieldInfo fi = typeof(PlayerStatsManager).GetField("hardInvincibility", AllFlags);
+            return fi != null && (bool)fi.GetValue(stats);
         }
 
         public void SendLocalLoadout(bool force)
@@ -1609,9 +1845,11 @@ namespace CupheadCoop
 
         private void OnLocalPlayerDeath(PlayerId playerId)
         {
-            if (!_transport.IsConnected)
+            if (!_transport.IsConnected || _applyingRemoteDeath)
                 return;
-            byte[] pkt = CoopProtocol.BuildLevelEvent(LevelEventType.PlayerDeath, (byte)playerId, 0f, 0f, 0);
+            AbstractPlayerController p = PlayerManager.GetPlayer(playerId);
+            Vector3 pos = p != null ? p.transform.position : Vector3.zero;
+            byte[] pkt = CoopProtocol.BuildLevelEvent(LevelEventType.PlayerDeath, (byte)playerId, pos.x, pos.y, 0);
             _transport.Send(pkt, true);
         }
 
@@ -1832,7 +2070,7 @@ namespace CupheadCoop
                     {
                         _sceneLoadSequence++;
                         _currentRngSeed = Environment.TickCount ^ (_sceneLoadSequence * 7919);
-                        UnityEngine.Random.InitState(_currentRngSeed);
+                        SynchronizeBossPropertiesRng(_currentRngSeed);
                         byte[] reloadPkt = CoopProtocol.BuildLevelEvent(
                             LevelEventType.LevelReload,
                             0,
@@ -1874,7 +2112,8 @@ namespace CupheadCoop
             if (!_transport.IsConnected || _transport.Role != CoopRole.Host || Level.Current == null)
                 return;
 
-            _currentRngSeed = Environment.TickCount ^ (int)_localTick;
+            int phaseSeed = _currentRngSeed ^ (((int)_localTick + 1) * 0x45D9F);
+            _currentRngSeed = phaseSeed;
             UnityEngine.Random.InitState(_currentRngSeed);
             float dmg = Level.Current.timeline != null ? Level.Current.timeline.damage : 0f;
             float bossHp = GetBossPropertiesHealth();
@@ -2177,7 +2416,7 @@ namespace CupheadCoop
             {
                 _sessionEpoch = epoch;
                 _currentRngSeed = rngSeed;
-                UnityEngine.Random.InitState(_currentRngSeed);
+                SynchronizeBossPropertiesRng(_currentRngSeed);
             }
 
             SanitizeLoadoutForDlc(ref primaryWep, ref secondaryWep, ref superId, ref charmId);
@@ -2371,6 +2610,12 @@ namespace CupheadCoop
             if (remoteCtrl.stats != null && pkt.Health > 0 && remoteCtrl.stats.Health != pkt.Health)
             {
                 remoteCtrl.stats.SetHealth(pkt.Health);
+            }
+
+            if ((pkt.Flags & PlayerStateFlags.IsDead) != 0 && !remoteCtrl.IsDead)
+            {
+                ApplyRemoteDeathEvent(remoteId, newPos);
+                return;
             }
 
             bool isParrying = (pkt.Flags & PlayerStateFlags.Parrying) != 0;
@@ -2603,7 +2848,7 @@ namespace CupheadCoop
                     if (_transport.Role == CoopRole.Client)
                     {
                         _currentRngSeed = intVal;
-                        UnityEngine.Random.InitState(_currentRngSeed);
+                        SynchronizeBossPropertiesRng(_currentRngSeed);
                         if (Level.Current != null && Level.Current.timeline != null)
                         {
                             float delta = valA - Level.Current.timeline.damage;
@@ -2622,6 +2867,11 @@ namespace CupheadCoop
 
                 case LevelEventType.LevelReady:
                     _remoteReadyForLevelId = intVal;
+                    if (_transport.Role == CoopRole.Client && (int)valB != 0)
+                    {
+                        _currentRngSeed = (int)valB;
+                        SynchronizeBossPropertiesRng(_currentRngSeed);
+                    }
                     if (_waitingAtLevelReadyGate && _levelReadyGateLevelId == intVal)
                     {
                         ReleaseLevelReadyGate();
@@ -2630,6 +2880,10 @@ namespace CupheadCoop
 
                 case LevelEventType.PauseSync:
                     ApplyRemotePauseSync(intVal != 0);
+                    break;
+
+                case LevelEventType.PlayerDeath:
+                    ApplyRemoteDeathEvent((PlayerId)playerIdByte, new Vector3(valA, valB, 0f));
                     break;
 
                 case LevelEventType.PlayerRevive:
@@ -2641,7 +2895,7 @@ namespace CupheadCoop
                     if (_transport.Role == CoopRole.Client)
                     {
                         _currentRngSeed = intVal;
-                        UnityEngine.Random.InitState(_currentRngSeed);
+                        SynchronizeBossPropertiesRng(_currentRngSeed);
 
                         if (_clientInitiatedReload && (Time.unscaledTime - _clientInitiatedReloadTime) < 8.0f)
                         {
@@ -2696,6 +2950,43 @@ namespace CupheadCoop
                         PlayerData.Data.TryActivateDjimmi();
                     }
                     break;
+            }
+        }
+
+        private void ApplyRemoteDeathEvent(PlayerId deadPlayerId, Vector3 pos)
+        {
+            if (deadPlayerId != GetRemotePlayerId())
+                return;
+
+            _applyingRemoteDeath = true;
+            try
+            {
+                AbstractPlayerController p = PlayerManager.GetPlayer(deadPlayerId);
+                if (p == null || p.IsDead)
+                    return;
+
+                if (pos != Vector3.zero)
+                {
+                    p.transform.position = new Vector3(pos.x, pos.y, p.transform.position.z);
+                }
+
+                if (p.stats != null)
+                {
+                    p.stats.SetHealth(0);
+                    MethodInfo onStatsDeath = typeof(PlayerStatsManager).GetMethod("OnStatsDeath", AllFlags);
+                    if (onStatsDeath != null)
+                    {
+                        onStatsDeath.Invoke(p.stats, null);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                CupheadCoopBootstrapper.Log("ApplyRemoteDeathEvent warning: " + ex.Message);
+            }
+            finally
+            {
+                _applyingRemoteDeath = false;
             }
         }
 
@@ -2834,7 +3125,7 @@ namespace CupheadCoop
             }
 
             _currentRngSeed = rngSeed;
-            UnityEngine.Random.InitState(_currentRngSeed);
+            SynchronizeBossPropertiesRng(_currentRngSeed);
 
             if (_transport.Role == CoopRole.Client && !string.IsNullOrEmpty(sceneName))
             {
@@ -2849,6 +3140,7 @@ namespace CupheadCoop
                     if (activeScene == sceneName && _lastClientRequestedScene == sceneName && (Time.unscaledTime - _lastClientRequestTime) < 12.0f)
                     {
                         _lastClientRequestedScene = string.Empty;
+                        SynchronizeBossPropertiesRng(_currentRngSeed);
                         CupheadCoopBootstrapper.Log("Client adopted Host RNG seed for Client-requested scene: " + sceneName);
                         return;
                     }
