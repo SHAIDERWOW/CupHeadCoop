@@ -22,8 +22,10 @@
 - **🌐 Steam P2P Integrado (Sem Redirecionar Portas / Sem VPN):**
   - Conecte-se facilmente através da sua lista de amigos da Steam ou compartilhando um Código de Sala com atalhos de teclado (`F5` / `F6`). Sem Hamachi, sem Radmin e sem abrir portas no roteador.
   - Também inclui modo Direto por UDP para quem preferir jogar em LAN / rede local offline.
-- **🌐 Regionalização Dinâmica (PT-BR / EN) e Verificador de Atualizações:**
+- **🌐 Regionalização Dinâmica (PT-BR / EN), Status na Steam (Rich Presence) e Verificador de Atualizações:**
   - Segue automaticamente o idioma configurado no seu Cuphead (Português do Brasil ou Inglês) em todos os textos e mensagens, com botão de troca manual no menu `F9`.
+  - **Status Dinâmico na Lista de Amigos da Steam (`Steam Rich Presence`):** Exibe o chefe ou ilha atual na sua lista de amigos da Steam usando os nomes oficiais em PT-BR ou Inglês (ex.: `Enfrentando Botânico Rebelde (2 Jogadores)` / `Explorando a Ilha Tinteiro I (Sozinho)`), com botão de **Ativar/Desativar** salvo nas preferências.
+  - **Lista de Jogadores na Sessão com Ping e Copiar Log:** Exibe o nome da Steam, função (`[Host]` / `[Player 2]`) e o ping em tempo real (`ms`) no menu `F9`, além de botão para **Copiar Log (`CupheadCoop.log`)** com 1 clique e atalhos diretos para **GitHub** e **Nexus Mods**.
   - Verificação silenciosa e assíncrona ao iniciar o jogo avisa se houver uma nova versão no GitHub sem causar quedas de FPS.
 - **🔄 Sincronização Completa da Gameplay:**
   - **Portão de Início de Fase Sincronizado (`LevelReadyGate`):** Se o PC de um jogador carregar a fase antes do outro, a luta aguarda os dois terminarem a tela de loading para começar exatamente no mesmo milissegundo.
@@ -51,7 +53,7 @@
 
 > **Observação:** Você e seu amigo precisam ter o jogo Cuphead original na Steam.
 
-1. Baixe o arquivo `CupheadCoop-v1.1.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases).
+1. Baixe o arquivo `CupheadCoop-v1.2.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) (ou no [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
 2. Extraia o conteúdo do arquivo `.zip` diretamente dentro da pasta de instalação do seu Cuphead:
    - Caminho padrão da Steam: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verifique se os arquivos abaixo estão na pasta junto com o `Cuphead.exe`:

@@ -22,8 +22,10 @@
 - **🌐 Built-in Steam P2P (No Port Forwarding):**
   - Connect directly through your Steam Friends list or by sharing a 1-click Lobby Code with hotkeys (`F5` / `F6`). No VPNs, no router port forwarding.
   - Also includes a Direct UDP mode for offline LAN play.
-- **🌐 Dynamic Regionalization (PT-BR / EN) & Update Checker:**
+- **🌐 Dynamic Regionalization (PT-BR / EN), Steam Rich Presence & Update Checker:**
   - Automatically matches your in-game language setting (Portuguese or English) across all menus and notices, with a manual quick-toggle button in the `F9` overlay.
+  - **Dynamic Steam Rich Presence (`SteamFriends.SetRichPresence`):** Displays what you are doing right now in your Steam Friends list using official localized boss and stage names (e.g., `Fighting The Root Pack (2 Players)` / `Enfrentando Botânico Rebelde (2 Jogadores)`), with an On/Off toggle button saved in `PlayerPrefs`.
+  - **Session Player List & One-Click Diagnostics:** Shows connected players' Steam names, roles (`[Host]` / `[Player 2]`), and real-time ping (`ms`) in the `F9` overlay, plus a 1-click **"Copy Log (CupheadCoop.log)"** button and direct **GitHub** & **Nexus Mods** links.
   - Silent, non-intrusive background check informs you when a new mod release is available on GitHub without impacting performance.
 - **🔄 Complete Gameplay Synchronization:**
   - **Symmetric Level-Start Barrier (`LevelReadyGate`):** If one player's PC loads a boss stage faster than the other, the fight waits until both players finish loading so both timelines start on the exact same millisecond.
@@ -51,7 +53,7 @@
 
 > **Note:** Both you and your friend must have a legitimate copy of Cuphead on Steam.
 
-1. Download the latest `CupheadCoop-v1.1.0.zip` from the [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) page.
+1. Download the latest `CupheadCoop-v1.2.0.zip` from the [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) page (or from [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
 2. Extract the contents of the `.zip` directly into your Cuphead game folder:
    - Default Steam path: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verify that the following files are present in the folder next to `Cuphead.exe`:
