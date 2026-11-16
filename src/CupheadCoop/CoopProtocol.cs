@@ -27,6 +27,7 @@ namespace CupheadCoop
         HandshakeReject = 12,
         SceneRequest = 13,
         WorldSaveMirrorChunk = 14,
+        MapLevelSelectSync = 15,
         UdpAck = 250
     }
 
@@ -70,7 +71,8 @@ namespace CupheadCoop
         CoinCollected = 12,
         DjimmiActivated = 13,
         LevelReady = 14,
-        PauseSync = 15
+        PauseSync = 15,
+        MausoleumGhostParried = 16
     }
 
     public enum AchievementSyncKind : byte
@@ -168,7 +170,7 @@ namespace CupheadCoop
     public static class CoopProtocol
     {
         public const uint ProtocolVersion = 2;
-        public const string ModVersion = "1.1.1";
+        public const string ModVersion = "1.3.0";
 
         public static byte[] BuildHandshake(
             uint epoch,
@@ -222,6 +224,21 @@ namespace CupheadCoop
                 bw.Write(sceneName ?? string.Empty);
                 bw.Write(levelId);
                 bw.Write(difficultyMode);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildMapLevelSelectSync(byte uiKind, bool isOpen, string levelName, int difficultyMode, int cursorIndex)
+        {
+            using (MemoryStream ms = new MemoryStream(64))
+            using (BinaryWriter bw = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                bw.Write((byte)PacketType.MapLevelSelectSync);
+                bw.Write(uiKind);
+                bw.Write(isOpen);
+                bw.Write(levelName ?? string.Empty);
+                bw.Write(difficultyMode);
+                bw.Write(cursorIndex);
                 return ms.ToArray();
             }
         }

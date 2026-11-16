@@ -18,6 +18,8 @@ namespace CupheadCoop
         public const string GitHubRepoUrl = "https://github.com/SHAIDERWOW/CupHeadCoop";
         public const string GitHubReleasesUrl = "https://github.com/SHAIDERWOW/CupHeadCoop/releases";
         public const string GitHubLatestReleaseApiUrl = "https://api.github.com/repos/SHAIDERWOW/CupHeadCoop/releases/latest";
+        public const string NexusModsUrl = "https://www.nexusmods.com/cuphead/mods/219";
+        private const string RichPresencePrefKey = "CupheadCoop_RichPresence";
 
         public CoopNetworkTransport Transport { get; private set; }
         public CoopSyncController Sync { get; private set; }
@@ -32,6 +34,13 @@ namespace CupheadCoop
 
         // 0 = Auto (Follow Cuphead's Localization.language), 1 = Forced PT-BR, 2 = Forced EN
         private int _languageMode;
+
+        // Dynamic Steam Rich Presence & Copy Feedback state (v1.2.0 / v1.3.0)
+        private bool _richPresenceEnabled = true;
+        private string _lastAppliedRichPresence = string.Empty;
+        private float _richPresenceTimer;
+        private float _logCopiedFeedbackUntil;
+        private float _codeCopiedFeedbackUntil;
 
         // Asynchronous GitHub Update Checker state
         private bool _updateCheckCompleted;
@@ -59,6 +68,15 @@ namespace CupheadCoop
             Instance = this;
             DontDestroyOnLoad(gameObject);
             Application.runInBackground = true;
+
+            try
+            {
+                _richPresenceEnabled = PlayerPrefs.GetInt(RichPresencePrefKey, 1) != 0;
+            }
+            catch
+            {
+                _richPresenceEnabled = true;
+            }
 
             Transport = new CoopNetworkTransport();
             Sync = new CoopSyncController(Transport);
@@ -278,12 +296,20 @@ namespace CupheadCoop
             {
                 Sync.OnSceneLoaded(sceneName);
             }
+            UpdateSteamRichPresence(true);
         }
 
         private void Update()
         {
             if (!Application.runInBackground)
                 Application.runInBackground = true;
+
+            _richPresenceTimer += Time.unscaledDeltaTime;
+            if (_richPresenceTimer >= 1.5f)
+            {
+                _richPresenceTimer = 0f;
+                UpdateSteamRichPresence(false);
+            }
 
             if (Input.GetKeyDown(KeyCode.F9))
             {
@@ -323,6 +349,7 @@ namespace CupheadCoop
                     else if (Transport.UsingSteamP2P && Transport.CurrentLobbyId.IsValid())
                     {
                         GUIUtility.systemCopyBuffer = Transport.CurrentLobbyId.m_SteamID.ToString();
+                        _codeCopiedFeedbackUntil = Time.unscaledTime + 2.5f;
                     }
                 }
             }
@@ -675,11 +702,11 @@ namespace CupheadCoop
                     && !IsRemoteVersionNewer("1.1.0", "1.1.0")
                     && !IsRemoteVersionNewer("1.1.0", "1.0.0");
 
-                // Fix #1 (v1.1.1): Map Bridge Refresh (empty _levels preserved + completed _levels enabled)
+                // Fix #1 (v1.1.1+): Map Bridge Refresh (disabled Bridge 1 component with Platforming_Level_1_1 preserved + completed _levels enabled + 33-coin inflation guard)
                 bool mapBridgeRefreshVerified = false;
                 if (PlayerData.Initialized && PlayerData.Data != null)
                 {
-                    GameObject testRoot = new GameObject("CoopTestBridgeObstacle");
+                    GameObject testRoot = new GameObject("Bridge 1");
                     GameObject toEnable = new GameObject("BridgeEnable");
                     GameObject toDisable = new GameObject("BridgeDisable");
                     toEnable.transform.SetParent(testRoot.transform);
@@ -691,13 +718,16 @@ namespace CupheadCoop
                     var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
                     typeof(MapLevelDependentObstacle).GetField("ToEnable", flags).SetValue(obs, toEnable);
                     typeof(MapLevelDependentObstacle).GetField("ToDisable", flags).SetValue(obs, toDisable);
-                    typeof(AbstractMapLevelDependentEntity).GetField("_levels", flags).SetValue(obs, new Levels[0]);
 
-                    // Empty _levels (like the World 1 start bridge) must remain enabled
+                    // Disabled component (like "Bridge 1" in scene_map_world_1 with _levels=[Platforming_Level_1_1] and enabled=false) must remain enabled!
+                    obs.enabled = false;
+                    typeof(AbstractMapLevelDependentEntity).GetField("_levels", flags).SetValue(obs, new Levels[] { Levels.Platforming_Level_1_1 });
                     CoopSyncController.RefreshMapObstacles(true);
-                    bool emptyLevelsPreserved = toEnable.activeSelf && !toDisable.activeSelf;
+                    bool disabledBridge1Preserved = toEnable.activeSelf && !toDisable.activeSelf;
 
-                    // Completed level obstacle must transition to enabled state
+                    // Completed level obstacle (with enabled=true) must transition to enabled state
+                    testRoot.name = "Bridge 2";
+                    obs.enabled = true;
                     var vegData = PlayerData.Data.GetLevelData(Levels.Veggies);
                     bool origCompleted = vegData.completed;
                     vegData.completed = true;
@@ -708,8 +738,18 @@ namespace CupheadCoop
                     bool completedLevelEnabled = toEnable.activeSelf && !toDisable.activeSelf;
                     vegData.completed = origCompleted;
 
+                    // Verify 33-coin singleplayer P2 unspent coin inflation guard (P1=0, P2=33 -> both become 0)
+                    int origC1 = PlayerData.Data.GetCurrency(PlayerId.PlayerOne);
+                    int origC2 = PlayerData.Data.GetCurrency(PlayerId.PlayerTwo);
+                    CoopSyncController.SetPlayerCurrencyExact(PlayerId.PlayerOne, 0);
+                    CoopSyncController.SetPlayerCurrencyExact(PlayerId.PlayerTwo, 33);
+                    Sync.MirrorAndSyncPlayerInventories(false);
+                    bool no33CoinInflation = (PlayerData.Data.GetCurrency(PlayerId.PlayerOne) == 0 && PlayerData.Data.GetCurrency(PlayerId.PlayerTwo) == 0);
+                    CoopSyncController.SetPlayerCurrencyExact(PlayerId.PlayerOne, origC1);
+                    CoopSyncController.SetPlayerCurrencyExact(PlayerId.PlayerTwo, origC2);
+
                     DestroyImmediate(testRoot);
-                    mapBridgeRefreshVerified = emptyLevelsPreserved && completedLevelEnabled;
+                    mapBridgeRefreshVerified = disabledBridge1Preserved && completedLevelEnabled && no33CoinInflation;
                 }
 
                 // Fix #2 (v1.1.1): No Duplicate Player Clone When Partner Is Dead
@@ -777,8 +817,72 @@ namespace CupheadCoop
                     }
                 }
 
+                // Fix #5 (v1.2.0): Dynamic Steam Rich Presence (Official PT-BR / EN boss & stage names + Toggle) & Copy Log to Clipboard
+                string rpPtCoop = FormatRichPresenceText("scene_level_veggies", (int)Levels.Veggies, true, true);
+                string rpEnSolo = FormatRichPresenceText("scene_map_world_1", -1, false, false);
+                bool richPresenceVerified = (rpPtCoop == "Enfrentando Botânico Rebelde (2 Jogadores)")
+                    && (rpEnSolo == "Exploring Inkwell Isle I (Solo)");
+
+                bool copyLogVerified = CopyRecentLogToClipboard() && !string.IsNullOrEmpty(GUIUtility.systemCopyBuffer);
+
+                // =========================================================================
+                // NEW v1.3.0 VERIFICATIONS (HELLguy14's 7 Fixes + UI Refinements)
+                // =========================================================================
+
+                // 1. NPC / Ms. Chalice Dialogue Auto-Positioning & Interactor.Either
+                bool npcDialogueAutoPosVerified = false;
+                AbstractPlayerController remotePlayer = PlayerManager.GetPlayer(Sync.GetRemotePlayerId());
+                if (remotePlayer != null)
+                {
+                    Vector3 origRemotePos = remotePlayer.transform.position;
+                    GameObject dlgGo = new GameObject("TestDialoguePoint");
+                    dlgGo.transform.position = new Vector3(100f, 0f, 0f);
+                    DialogueInteractionPoint dip = dlgGo.AddComponent<DialogueInteractionPoint>();
+                    var allFlags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    dip.interactor = AbstractLevelInteractiveEntity.Interactor.Both;
+                    typeof(DialogueInteractionPoint).GetField("conversationIsActive", allFlags).SetValue(dip, true);
+                    typeof(DialogueInteractionPoint).GetField("playerOneDialoguePosition", allFlags).SetValue(dip, new Vector2(-40f, 0f));
+                    typeof(DialogueInteractionPoint).GetField("playerTwoDialoguePosition", allFlags).SetValue(dip, new Vector2(45f, 0f));
+
+                    bool snapped = Sync.MonitorActiveDialoguesAndInteractions(true);
+                    float expectedX = Sync.GetRemotePlayerId() == PlayerId.PlayerTwo ? 145f : 60f;
+                    npcDialogueAutoPosVerified = snapped
+                        && dip.interactor == AbstractLevelInteractiveEntity.Interactor.Either
+                        && Mathf.Abs(remotePlayer.transform.position.x - expectedX) < 0.1f;
+
+                    DestroyImmediate(dlgGo);
+                    remotePlayer.transform.position = origRemotePos;
+                }
+
+                // 2. Stale Death Retry Guard & Invisible Spirit Self-Healing
+                bool staleDeathRetryGuardVerified = false;
+                if (remotePlayer != null && remotePlayer.stats != null)
+                {
+                    int origRemoteHp = remotePlayer.stats.Health;
+                    Sync.SetIgnoreRemoteDeathWindow(2.5f);
+                    byte[] staleDeathPkt = CoopProtocol.BuildLevelEvent(
+                        LevelEventType.PlayerDeath,
+                        (byte)Sync.GetRemotePlayerId(),
+                        remotePlayer.transform.position.x,
+                        remotePlayer.transform.position.y,
+                        0);
+                    Transport.InjectTestPayload(staleDeathPkt);
+                    bool ignoredStaleDeath = !remotePlayer.IsDead && Sync.IsRemoteDeathCurrentlyIgnored;
+                    Sync.SetIgnoreRemoteDeathWindow(0f);
+                    remotePlayer.stats.SetHealth(origRemoteHp > 0 ? origRemoteHp : 3);
+                    staleDeathRetryGuardVerified = ignoredStaleDeath;
+                }
+
+                // 3. Boss Phase Transition Sync + Mausoleum Ghost Parry & Map Level Select Sync Packets
+                byte[] phasePkt = CoopProtocol.BuildLevelEvent(LevelEventType.BossPhaseChange, 1, 100f, 500f, 777777);
+                byte[] ghostParryPkt = CoopProtocol.BuildLevelEvent(LevelEventType.MausoleumGhostParried, (byte)PlayerId.PlayerOne, 12f, 34f, 0);
+                byte[] mapSelPkt = CoopProtocol.BuildMapLevelSelectSync(1, true, "Slime", (int)Level.Mode.Hard, 2);
+                bool v130PacketsVerified = phasePkt != null && phasePkt.Length >= 15
+                    && ghostParryPkt != null && ghostParryPkt.Length >= 15
+                    && mapSelPkt != null && mapSelPkt.Length >= 10;
+
                 return string.Format(
-                    "{{\"ok\":true,\"pauseLeaveProtected\":{0},\"loadoutSynced\":{1},\"inventorySynced\":{2},\"kdPacketValid\":{3},\"eventsValid\":{4},\"levelReadyGateVerified\":{5},\"pauseSyncVerified\":{6},\"sceneRequestVerified\":{7},\"worldSaveMirrorVerified\":{8},\"dlcAndVersionGuardVerified\":{9},\"coldLaunchInviteVerified\":{10},\"autoReconnectVerified\":{11},\"knockoutGateVerified\":{12},\"localizationVerified\":{13},\"updateCheckParserVerified\":{14},\"mapBridgeRefreshVerified\":{15},\"noDeadPlayerCloneVerified\":{16},\"remoteDamageGuardAndDeathSyncVerified\":{17},\"bossPatternRngSyncVerified\":{18}}}",
+                    "{{\"ok\":true,\"pauseLeaveProtected\":{0},\"loadoutSynced\":{1},\"inventorySynced\":{2},\"kdPacketValid\":{3},\"eventsValid\":{4},\"levelReadyGateVerified\":{5},\"pauseSyncVerified\":{6},\"sceneRequestVerified\":{7},\"worldSaveMirrorVerified\":{8},\"dlcAndVersionGuardVerified\":{9},\"coldLaunchInviteVerified\":{10},\"autoReconnectVerified\":{11},\"knockoutGateVerified\":{12},\"localizationVerified\":{13},\"updateCheckParserVerified\":{14},\"mapBridgeRefreshVerified\":{15},\"noDeadPlayerCloneVerified\":{16},\"remoteDamageGuardAndDeathSyncVerified\":{17},\"bossPatternRngSyncVerified\":{18},\"richPresenceVerified\":{19},\"copyLogVerified\":{20},\"npcDialogueAutoPosVerified\":{21},\"staleDeathRetryGuardVerified\":{22},\"v130PacketsVerified\":{23}}}",
                     pauseLeaveProtected ? "true" : "false",
                     loadoutSynced ? "true" : "false",
                     inventorySynced ? "true" : "false",
@@ -797,12 +901,305 @@ namespace CupheadCoop
                     mapBridgeRefreshVerified ? "true" : "false",
                     noDeadPlayerCloneVerified ? "true" : "false",
                     remoteDamageGuardAndDeathSyncVerified ? "true" : "false",
-                    bossPatternRngSyncVerified ? "true" : "false");
+                    bossPatternRngSyncVerified ? "true" : "false",
+                    richPresenceVerified ? "true" : "false",
+                    copyLogVerified ? "true" : "false",
+                    npcDialogueAutoPosVerified ? "true" : "false",
+                    staleDeathRetryGuardVerified ? "true" : "false",
+                    v130PacketsVerified ? "true" : "false");
             }
             catch (Exception ex)
             {
                 return "{\"ok\":false,\"error\":\"" + (ex.Message ?? "").Replace("\"", "'") + "\"}";
             }
+        }
+
+        public static string FormatRichPresenceText(string sceneName, int levelId, bool isCoopConnected, bool pt)
+        {
+            string suffix = isCoopConnected
+                ? (pt ? " (2 Jogadores)" : " (2 Players)")
+                : (pt ? " (Sozinho)" : " (Solo)");
+
+            string s = (sceneName ?? string.Empty).Trim();
+
+            if (s.IndexOf("scene_title", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                s.IndexOf("scene_slot_select", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                s.IndexOf("scene_cutscene_intro", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "No Menu Principal" : "In Main Menu") + suffix;
+            }
+            if (s.IndexOf("scene_map_world_1", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "Explorando a Ilha Tinteiro I" : "Exploring Inkwell Isle I") + suffix;
+            }
+            if (s.IndexOf("scene_map_world_2", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "Explorando a Ilha Tinteiro II" : "Exploring Inkwell Isle II") + suffix;
+            }
+            if (s.IndexOf("scene_map_world_3", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "Explorando a Ilha Tinteiro III" : "Exploring Inkwell Isle III") + suffix;
+            }
+            if (s.IndexOf("scene_map_world_4", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "No Cassino do Rei Dado" : "In King Dice's Casino") + suffix;
+            }
+            if (s.IndexOf("scene_map_world_DLC", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "Explorando a Ilha Tinteiro IV" : "Exploring Inkwell Isle IV") + suffix;
+            }
+            if (s.IndexOf("scene_shop", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "No Empório do Torresmo" : "In Porkrind's Emporium") + suffix;
+            }
+            if (s.IndexOf("scene_win", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return (pt ? "Tela de Vitória" : "Victory Screen") + suffix;
+            }
+
+            if (Enum.IsDefined(typeof(Levels), levelId))
+            {
+                Levels lvl = (Levels)levelId;
+                bool isRunAndGun = lvl == Levels.Platforming_Level_1_1
+                    || lvl == Levels.Platforming_Level_1_2
+                    || lvl == Levels.Platforming_Level_2_1
+                    || lvl == Levels.Platforming_Level_2_2
+                    || lvl == Levels.Platforming_Level_3_1
+                    || lvl == Levels.Platforming_Level_3_2;
+                bool isMausoleum = lvl == Levels.Mausoleum
+                    || s.IndexOf("mausoleum", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                string lvlName = GetOfficialLevelName(lvl, pt);
+                if (!string.IsNullOrEmpty(lvlName))
+                {
+                    if (isRunAndGun || isMausoleum)
+                        return (pt ? "Jogando " : "Playing ") + lvlName + suffix;
+                    return (pt ? "Enfrentando " : "Fighting ") + lvlName + suffix;
+                }
+            }
+
+            if (s.StartsWith("scene_level_", StringComparison.OrdinalIgnoreCase))
+            {
+                return (pt ? "Em Combate" : "In Battle") + suffix;
+            }
+
+            return (pt ? "Jogando Cuphead" : "Playing Cuphead") + suffix;
+        }
+
+        public static string GetOfficialLevelName(Levels level, bool pt)
+        {
+            switch (level)
+            {
+                // World 1 Bosses
+                case Levels.Veggies: return pt ? "Botânico Rebelde" : "The Root Pack";
+                case Levels.Slime: return pt ? "Goopy Le Grande" : "Goopy Le Grande";
+                case Levels.Frogs: return pt ? "Ribby e Croaks" : "Ribby and Croaks";
+                case Levels.FlyingBlimp: return pt ? "Hilda Berg" : "Hilda Berg";
+                case Levels.Flower: return pt ? "Cagney Cravo" : "Cagney Carnation";
+
+                // World 2 Bosses
+                case Levels.Baroness: return pt ? "Baronesa Von Bombom" : "Baroness Von Bon Bon";
+                case Levels.Clown: return pt ? "Beppi, o Palhaço" : "Beppi The Clown";
+                case Levels.FlyingGenie: return pt ? "Djimmi, o Grande" : "Djimmi The Great";
+                case Levels.Dragon: return pt ? "Grim Matchstick" : "Grim Matchstick";
+                case Levels.FlyingBird: return pt ? "Wally Warbles" : "Wally Warbles";
+
+                // World 3 Bosses
+                case Levels.Bee: return pt ? "Rumor Honeybottoms" : "Rumor Honeybottoms";
+                case Levels.Pirate: return pt ? "Capitão Brineybeard" : "Captain Brineybeard";
+                case Levels.SallyStagePlay: return pt ? "Sally Stageplay" : "Sally Stageplay";
+                case Levels.Mouse: return pt ? "Werner Werman" : "Werner Werman";
+                case Levels.Robot: return pt ? "Robô do Dr. Kahl" : "Dr. Kahl's Robot";
+                case Levels.FlyingMermaid: return pt ? "Cala Maria" : "Cala Maria";
+                case Levels.Train: return pt ? "Expresso Fantasma" : "Phantom Express";
+
+                // World 4 (King Dice & Devil)
+                case Levels.DicePalaceMain:
+                case Levels.DicePalaceBooze:
+                case Levels.DicePalaceChips:
+                case Levels.DicePalaceCigar:
+                case Levels.DicePalaceDomino:
+                case Levels.DicePalaceEightBall:
+                case Levels.DicePalaceFlyingHorse:
+                case Levels.DicePalaceFlyingMemory:
+                case Levels.DicePalaceRabbit:
+                case Levels.DicePalaceRoulette:
+                    return pt ? "Rei Dado" : "King Dice";
+                case Levels.Devil:
+                    return pt ? "O Diabo" : "The Devil";
+
+                // DLC (Inkwell Isle IV) Bosses
+                case Levels.OldMan: return pt ? "Glumstone, o Gigante" : "Glumstone The Giant";
+                case Levels.RumRunners: return pt ? "Máfia do Contrabando" : "Moonshine Mob";
+                case Levels.Airplane: return pt ? "Os Irmãos Uivantes" : "The Howling Aces";
+                case Levels.SnowCult: return pt ? "Mortimer Freeze" : "Mortimer Freeze";
+                case Levels.FlyingCowboy: return pt ? "Esther Winchester" : "Esther Winchester";
+                case Levels.Saltbaker: return pt ? "Chef Saltbaker" : "Chef Saltbaker";
+                case Levels.Graveyard: return pt ? "Anjo e Demônio" : "Angel and Demon";
+                case Levels.ChessPawn:
+                case Levels.ChessKnight:
+                case Levels.ChessBishop:
+                case Levels.ChessRook:
+                case Levels.ChessQueen:
+                    return pt ? "Torre do Rei" : "The King's Leap";
+
+                // Run & Gun + Mausoleum
+                case Levels.Platforming_Level_1_1: return pt ? "Loucura na Floresta" : "Forest Follies";
+                case Levels.Platforming_Level_1_2: return pt ? "Problema na Árvore" : "Treetop Trouble";
+                case Levels.Platforming_Level_2_1: return pt ? "Febre do Circo" : "Funfair Fever";
+                case Levels.Platforming_Level_2_2: return pt ? "Casa de Diversões" : "Funhouse Frazzle";
+                case Levels.Platforming_Level_3_1: return pt ? "Perigo no Píer" : "Perilous Piers";
+                case Levels.Platforming_Level_3_2: return pt ? "Cume Tempestuoso" : "Rugged Ridge";
+                case Levels.Mausoleum: return pt ? "Mausoléu" : "Mausoleum";
+                default:
+                    return string.Empty;
+            }
+        }
+
+        private void UpdateSteamRichPresence(bool force)
+        {
+            if (CoopOnlineInterface.TestModeNoSteamWrite)
+                return;
+
+            try
+            {
+                if (!CoopNetworkTransport.IsSteamInitialized())
+                    return;
+
+                if (!_richPresenceEnabled)
+                {
+                    if (_lastAppliedRichPresence != "__CLEARED__")
+                    {
+                        Steamworks.SteamFriends.ClearRichPresence();
+                        _lastAppliedRichPresence = "__CLEARED__";
+                    }
+                    return;
+                }
+
+                string sceneName = SceneManager.GetActiveScene().name;
+                int levelId = Level.Current != null ? (int)Level.Current.CurrentLevel : (int)Level.PreviousLevel;
+                if (sceneName == null || !sceneName.StartsWith("scene_level_", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (Level.Current == null)
+                        levelId = -1;
+                }
+
+                bool isConnected = Transport != null && Transport.IsConnected;
+                bool pt = IsPortugueseActive();
+                string statusText = FormatRichPresenceText(sceneName, levelId, isConnected, pt);
+
+                if (!force && statusText == _lastAppliedRichPresence)
+                    return;
+
+                Steamworks.SteamFriends.SetRichPresence("status", statusText);
+                _lastAppliedRichPresence = statusText;
+            }
+            catch { }
+        }
+
+        private string GetCurrentActivityText(bool pt)
+        {
+            try
+            {
+                string sceneName = SceneManager.GetActiveScene().name;
+                int levelId = Level.Current != null ? (int)Level.Current.CurrentLevel : (int)Level.PreviousLevel;
+                if (sceneName == null || !sceneName.StartsWith("scene_level_", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (Level.Current == null)
+                        levelId = -1;
+                }
+                bool isConnected = Transport != null && Transport.IsConnected;
+                return FormatRichPresenceText(sceneName, levelId, isConnected, pt);
+            }
+            catch
+            {
+                return pt ? "Jogando Cuphead" : "Playing Cuphead";
+            }
+        }
+
+        public bool CopyRecentLogToClipboard()
+        {
+            try
+            {
+                string path = Path.GetFullPath("CupheadCoop.log");
+                if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                {
+                    GUIUtility.systemCopyBuffer = "CupheadCoop v" + CoopProtocol.ModVersion + " - Log file not found.";
+                    _logCopiedFeedbackUntil = Time.unscaledTime + 3.0f;
+                    return true;
+                }
+
+                string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+                int lastSessionIdx = -1;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    if (lines[i] != null && lines[i].IndexOf("InitializeEarly()", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        lastSessionIdx = i;
+                        break;
+                    }
+                }
+
+                int start = lastSessionIdx >= 0
+                    ? Math.Max(0, lastSessionIdx)
+                    : Math.Max(0, lines.Length - 180);
+                if (lines.Length - start > 180)
+                    start = lines.Length - 180;
+
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("=== CupheadCoop v" + CoopProtocol.ModVersion + " Log ===");
+                for (int i = start; i < lines.Length; i++)
+                {
+                    sb.AppendLine(lines[i]);
+                }
+                GUIUtility.systemCopyBuffer = sb.ToString();
+                _logCopiedFeedbackUntil = Time.unscaledTime + 3.0f;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    GUIUtility.systemCopyBuffer = "CupheadCoop v" + CoopProtocol.ModVersion + " Log Error: " + ex.Message;
+                    _logCopiedFeedbackUntil = Time.unscaledTime + 3.0f;
+                }
+                catch { }
+                return false;
+            }
+        }
+
+        private string GetLocalPlayerDisplayName(bool pt)
+        {
+            try
+            {
+                if (CoopNetworkTransport.IsSteamInitialized())
+                {
+                    string name = Steamworks.SteamFriends.GetPersonaName();
+                    if (!string.IsNullOrEmpty(name))
+                        return name;
+                }
+            }
+            catch { }
+            return pt ? "Voce" : "You";
+        }
+
+        private string GetRemotePlayerDisplayName(bool pt)
+        {
+            if (Transport == null || !Transport.IsConnected)
+                return pt ? "Aguardando parceiro..." : "Waiting for partner...";
+
+            try
+            {
+                if (Transport.UsingSteamP2P && Transport.RemoteSteamId.IsValid() && CoopNetworkTransport.IsSteamInitialized())
+                {
+                    string friendName = Steamworks.SteamFriends.GetFriendPersonaName(Transport.RemoteSteamId);
+                    if (!string.IsNullOrEmpty(friendName))
+                        return friendName;
+                }
+            }
+            catch { }
+
+            return Transport.Role == CoopRole.Host ? "Player 2" : "Host";
         }
 
         private string GetLocalizedStatusMessage(bool pt)
@@ -847,18 +1244,20 @@ namespace CupheadCoop
                 ? ("Cuphead Co-op Online v" + CoopProtocol.ModVersion + " + Conquistas Steam (F9)")
                 : ("Cuphead Online Co-op v" + CoopProtocol.ModVersion + " + Steam Achievements (F9)");
 
-            GUI.Box(new Rect(12, 12, 435, 425), title);
+            int boxHeight = _updateAvailable ? 485 : 445;
+            GUI.Box(new Rect(12, 12, 435, boxHeight), title);
 
-            // Language toggle pill in the top-right corner of the box
+            // Language toggle pill in the top-right corner of the box (wider so "Idioma: Auto (PT)" never clips)
             string langBtnLabel = _languageMode == 0
                 ? (pt ? "Idioma: Auto (PT)" : "Lang: Auto (EN)")
                 : (pt ? "Idioma: PT" : "Lang: EN");
-            if (GUI.Button(new Rect(332, 34, 105, 20), langBtnLabel))
+            if (GUI.Button(new Rect(324, 34, 118, 20), langBtnLabel))
             {
                 _languageMode = (_languageMode + 1) % 3;
+                UpdateSteamRichPresence(true);
             }
 
-            GUILayout.BeginArea(new Rect(22, 38, 415, 390));
+            GUILayout.BeginArea(new Rect(22, 38, 415, boxHeight - 32));
             bool steamReady = CoopNetworkTransport.IsSteamInitialized();
             GUILayout.Label("Steam API: " + (steamReady
                 ? (pt ? "CONECTADA (Pronto)" : "CONNECTED (Ready)")
@@ -877,7 +1276,14 @@ namespace CupheadCoop
                 roleLabel, connLabel, Transport.LastRttMs));
 
             string dlcStatus;
-            if (Sync.BothPlayersHaveDlc)
+            if (!Transport.IsConnected)
+            {
+                if (CoopSyncController.IsLocalDlcEnabled())
+                    dlcStatus = pt ? "Ativa (Detectada)" : "Active (Detected)";
+                else
+                    dlcStatus = pt ? "Desativada" : "Not detected";
+            }
+            else if (Sync.BothPlayersHaveDlc)
             {
                 dlcStatus = pt ? "Ativa (Ambos possuem)" : "Active (Both players own DLC)";
             }
@@ -908,7 +1314,7 @@ namespace CupheadCoop
                 GUILayout.Label(Sync.LastVersionMismatchError);
             }
 
-            GUILayout.Space(6);
+            GUILayout.Space(4);
 
             if (Transport.Role == CoopRole.None)
             {
@@ -936,7 +1342,7 @@ namespace CupheadCoop
                 }
                 GUILayout.EndHorizontal();
 
-                GUILayout.Space(6);
+                GUILayout.Space(4);
                 GUILayout.Label(pt
                     ? "=== TESTE LOCAL / LAN (Opcional) ==="
                     : "=== DIRECT UDP / LAN (Optional) ===");
@@ -964,15 +1370,45 @@ namespace CupheadCoop
             }
             else
             {
+                // Connected Players List with Role & Ping
+                string localName = GetLocalPlayerDisplayName(pt);
+                string remoteName = GetRemotePlayerDisplayName(pt);
+                int pingMs = Mathf.RoundToInt(Transport.LastRttMs);
+                string hostLine;
+                string p2Line;
+                if (Transport.Role == CoopRole.Host)
+                {
+                    hostLine = string.Format(pt ? "  [Host] {0} (Voce) - 0 ms" : "  [Host] {0} (You) - 0 ms", localName);
+                    p2Line = Transport.IsConnected
+                        ? string.Format("  [Player 2] {0} - {1} ms", remoteName, pingMs)
+                        : ("  [Player 2] " + remoteName);
+                }
+                else
+                {
+                    hostLine = Transport.IsConnected
+                        ? string.Format("  [Host] {0} - {1} ms", remoteName, pingMs)
+                        : ("  [Host] " + remoteName);
+                    p2Line = string.Format(pt ? "  [Player 2] {0} (Voce) - {1} ms" : "  [Player 2] {0} (You) - {1} ms", localName, pingMs);
+                }
+                GUILayout.Label(pt ? "Jogadores na Sessao:" : "Players in Session:");
+                GUILayout.Label(hostLine);
+                GUILayout.Label(p2Line);
+
                 if (Transport.UsingSteamP2P && Transport.CurrentLobbyId.IsValid())
                 {
                     string code = Transport.CurrentLobbyId.m_SteamID.ToString();
                     GUILayout.Label((pt ? "Codigo da sua Sala Steam: " : "Your Steam Lobby Code: ") + code);
 
+                    bool showCodeCopied = Time.unscaledTime < _codeCopiedFeedbackUntil;
+                    string copyCodeLabel = showCodeCopied
+                        ? (pt ? "✔ Codigo Copiado!" : "✔ Code Copied!")
+                        : (pt ? "Copiar Codigo [F6]" : "Copy Code [F6]");
+
                     GUILayout.BeginHorizontal();
-                    if (GUILayout.Button(pt ? "Copiar Codigo [F6]" : "Copy Code [F6]"))
+                    if (GUILayout.Button(copyCodeLabel))
                     {
                         GUIUtility.systemCopyBuffer = code;
+                        _codeCopiedFeedbackUntil = Time.unscaledTime + 2.5f;
                     }
                     if (GUILayout.Button(pt ? "Convidar na Steam [F5]" : "Invite on Steam [F5]"))
                     {
@@ -994,33 +1430,62 @@ namespace CupheadCoop
                     : "Disconnect Co-op Session"))
                 {
                     Transport.Disconnect();
+                    UpdateSteamRichPresence(true);
                 }
             }
 
-            GUILayout.Space(8);
+            GUILayout.Space(6);
 
-            // Non-invasive Footer: Update status + Direct GitHub link
+            // Row 1 of Footer: Standardized GitHub + Nexus Mods (Feedback & Bugs)
             GUILayout.BeginHorizontal();
+            if (GUILayout.Button(pt ? "GitHub (Feedback & Bugs)" : "GitHub (Feedback & Bugs)"))
+            {
+                Application.OpenURL(GitHubRepoUrl);
+            }
+            if (GUILayout.Button(pt ? "Nexus Mods (Feedback & Bugs)" : "Nexus Mods (Feedback & Bugs)"))
+            {
+                Application.OpenURL(NexusModsUrl);
+            }
+            GUILayout.EndHorizontal();
+
+            // Optional Dual Download Row when a new update is available
             if (_updateAvailable)
             {
-                string updText = pt
-                    ? ("Nova versao v" + _latestRemoteVersion + " disponivel! [Baixar]")
-                    : ("New version v" + _latestRemoteVersion + " available! [Download]");
-                if (GUILayout.Button(updText))
+                GUIStyle updStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
+                string updNotice = pt
+                    ? ("Nova versao v" + _latestRemoteVersion + " disponivel! Escolha onde baixar:")
+                    : ("New version v" + _latestRemoteVersion + " available! Choose download:");
+                GUILayout.Label(updNotice, updStyle);
+
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(pt ? "Baixar no GitHub" : "Download on GitHub"))
                 {
                     Application.OpenURL(GitHubReleasesUrl);
                 }
-            }
-            else
-            {
-                string verLabel = _updateCheckCompleted
-                    ? (pt ? ("v" + CoopProtocol.ModVersion + " (Atualizado)") : ("v" + CoopProtocol.ModVersion + " (Up to date)"))
-                    : ("v" + CoopProtocol.ModVersion);
-                GUILayout.Label(verLabel, GUILayout.Width(145));
-                if (GUILayout.Button(pt ? "GitHub / Reportar Bug" : "GitHub / Report Issue"))
+                if (GUILayout.Button(pt ? "Baixar no Nexus Mods" : "Download on Nexus Mods"))
                 {
-                    Application.OpenURL(GitHubRepoUrl);
+                    Application.OpenURL(NexusModsUrl);
                 }
+                GUILayout.EndHorizontal();
+            }
+
+            // Bottom Row of Footer: Centered Version status + Copy Log to Clipboard with Instant Feedback
+            GUILayout.BeginHorizontal();
+            GUIStyle verStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
+            string verLabel = _updateAvailable
+                ? ("v" + CoopProtocol.ModVersion + " -> v" + _latestRemoteVersion)
+                : (_updateCheckCompleted
+                    ? (pt ? ("v" + CoopProtocol.ModVersion + " (Atualizado)") : ("v" + CoopProtocol.ModVersion + " (Up to date)"))
+                    : ("v" + CoopProtocol.ModVersion));
+            GUILayout.Label(verLabel, verStyle, GUILayout.Width(185), GUILayout.Height(22));
+
+            bool showCopied = Time.unscaledTime < _logCopiedFeedbackUntil;
+            string copyLogLabel = showCopied
+                ? (pt ? "✔ Log Copiado!" : "✔ Log Copied!")
+                : (pt ? "Copiar Log (CupheadCoop.log)" : "Copy Log (CupheadCoop.log)");
+            if (GUILayout.Button(copyLogLabel))
+            {
+                CopyRecentLogToClipboard();
             }
             GUILayout.EndHorizontal();
 

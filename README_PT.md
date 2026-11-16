@@ -22,15 +22,17 @@
 - **🌐 Steam P2P Integrado (Sem Redirecionar Portas / Sem VPN):**
   - Conecte-se facilmente através da sua lista de amigos da Steam ou compartilhando um Código de Sala com atalhos de teclado (`F5` / `F6`). Sem Hamachi, sem Radmin e sem abrir portas no roteador.
   - Também inclui modo Direto por UDP para quem preferir jogar em LAN / rede local offline.
-- **🌐 Regionalização Dinâmica (PT-BR / EN), Status na Steam (Rich Presence) e Verificador de Atualizações:**
+- **🌐 Regionalização Dinâmica (PT-BR / EN) e Verificador de Atualizações:**
   - Segue automaticamente o idioma configurado no seu Cuphead (Português do Brasil ou Inglês) em todos os textos e mensagens, com botão de troca manual no menu `F9`.
-  - **Status Dinâmico na Lista de Amigos da Steam (`Steam Rich Presence`):** Exibe o chefe ou ilha atual na sua lista de amigos da Steam usando os nomes oficiais em PT-BR ou Inglês (ex.: `Enfrentando Botânico Rebelde (2 Jogadores)` / `Explorando a Ilha Tinteiro I (Sozinho)`), com botão de **Ativar/Desativar** salvo nas preferências.
-  - **Lista de Jogadores na Sessão com Ping e Copiar Log:** Exibe o nome da Steam, função (`[Host]` / `[Player 2]`) e o ping em tempo real (`ms`) no menu `F9`, além de botão para **Copiar Log (`CupheadCoop.log`)** com 1 clique e atalhos diretos para **GitHub** e **Nexus Mods**.
-  - Verificação silenciosa e assíncrona ao iniciar o jogo avisa se houver uma nova versão no GitHub sem causar quedas de FPS.
+  - **Lista de Jogadores na Sessão com Ping e Feedback Instantâneo:** Exibe o nome da Steam, função (`[Host]` / `[Player 2]`) e o ping em tempo real (`ms`) no menu `F9`, além de botões com confirmação instantânea para **Copiar Código (`✔ Código Copiado!`)** e **Copiar Log (`✔ Log Copiado!`)**, e atalhos padronizados **GitHub (Feedback & Bugs)** e **Nexus Mods (Feedback & Bugs)**.
+  - Verificação silenciosa e assíncrona ao iniciar o jogo avisa se houver uma nova versão com botões diretos para **[Baixar no GitHub]** e **[Baixar no Nexus Mods]**.
 - **🔄 Sincronização Completa da Gameplay:**
   - **Portão de Início de Fase Sincronizado (`LevelReadyGate`):** Se o PC de um jogador carregar a fase antes do outro, a luta aguarda os dois terminarem a tela de loading para começar exatamente no mesmo milissegundo.
-  - **Pause Compartilhado (`PauseSync`):** Pausar ou despausar durante a luta pausa/despausa o jogo nos dois computadores ao mesmo tempo.
-  - **Comandos Bidirecionais (`SceneRequestSync`):** Qualquer um dos dois jogadores (Host ou Player 2) pode dar *Retry/Restart*, voltar ao Mapa ou iniciar fases pelo Mapa-Múndi.
+  - **Menu de Pause Visual Compartilhado (`PauseSync`):** Pausar ou despausar durante a fase ou no Mapa-Múndi abre e fecha o menu de pause visualmente nos dois computadores ao mesmo tempo.
+  - **Seleção de Fase e Dificuldade no Mapa (`MapLevelSelectSync`):** Quando qualquer jogador interage com uma fase no Mapa-Múndi, ambos veem a placa com o nome do chefe e o cursor de dificuldade (`Simple` / `Regular` / `Expert`) se movendo ao vivo.
+  - **Diálogos com NPCs e Ms. Chalice Sincronizados:** Reposiciona automaticamente o parceiro ao iniciar diálogos (Elder Kettle, Padaria do Saltbaker, Ms. Chalice no Mausoléu e Torre do Rei), sem travar o Jogador 1 esperando o Jogador 2 caminhar até o NPC.
+  - **Mausoléu Sincronizado:** Ondas de fantasmas e parries espelhados entre os dois jogadores, além de proteção contra "Game Over" falso na tela do Cliente.
+  - **Comandos Bidirecionais (`SceneRequestSync`):** Qualquer um dos dois jogadores (Host ou Player 2) pode dar *Retry/Restart* (com filtro contra o bug do "espírito invisível"), voltar ao Mapa ou iniciar fases pelo Mapa-Múndi. Voltar ao Menu Principal encerra a sala automaticamente.
   - **Espelhamento do Mapa-Múndi em Memória RAM (`WorldSaveMirror`):** Sincroniza pontes abertas, bandeiras de chefes vencidos e diálogos de NPCs (`Dialoguer`) do Host na memória RAM do Cliente, **sem sobrescrever o arquivo de save pessoal do Cliente no HD**.
   - **Chefes, Propriedades e Trava de Knockout:** Vida real do chefe (`AbstractLevelProperties`), linha do tempo, mudanças de fase, semente aleatória (RNG) e anúncio de `KNOCKOUT!` (`LevelOutcomeSync`) 100% sincronizados.
   - **Fases Run & Gun:** Moedas (`LevelCoin`) coletadas por qualquer um dos jogadores são computadas para ambos (`5/5`).
@@ -53,7 +55,7 @@
 
 > **Observação:** Você e seu amigo precisam ter o jogo Cuphead original na Steam.
 
-1. Baixe o arquivo `CupheadCoop-v1.2.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) (ou no [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
+1. Baixe o arquivo `CupheadCoop-v1.3.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) (ou no [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
 2. Extraia o conteúdo do arquivo `.zip` diretamente dentro da pasta de instalação do seu Cuphead:
    - Caminho padrão da Steam: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verifique se os arquivos abaixo estão na pasta junto com o `Cuphead.exe`:

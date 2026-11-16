@@ -318,6 +318,8 @@ namespace CupheadCoop
                 // Host keeps the lobby open so the Client can auto-reconnect seamlessly
                 StatusMessage = "Parceiro caiu (" + reason + "). Sala aberta aguardando reconexao...";
                 CupheadCoopBootstrapper.Log(StatusMessage);
+                if (wasConnected && OnPeerDisconnected != null)
+                    OnPeerDisconnected();
                 return;
             }
 
@@ -327,6 +329,8 @@ namespace CupheadCoop
                 _nextAutoReconnectUtc = DateTime.UtcNow.AddSeconds(AutoReconnectIntervalSeconds);
                 StatusMessage = "Conexao oscilou (" + reason + "). Reconectando sozinho (" + _autoReconnectAttemptsLeft + "x)...";
                 CupheadCoopBootstrapper.Log(StatusMessage);
+                if (wasConnected && OnPeerDisconnected != null)
+                    OnPeerDisconnected();
                 return;
             }
 

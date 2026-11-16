@@ -5,6 +5,7 @@ import struct
 import subprocess
 import sys
 import time
+import winreg
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TEST_INSTALL_DIR = os.path.join(ROOT_DIR, "local", "test_install")
@@ -13,6 +14,40 @@ HOST_SAVE_DIR = os.path.join(ROOT_DIR, "local", "test_saves", "host")
 LOG_FILE = os.path.join(TEST_INSTALL_DIR, "CupheadCoop.log")
 REQ_FILE = os.path.join(TEST_INSTALL_DIR, "coop_bridge_req.txt")
 RESP_FILE = os.path.join(TEST_INSTALL_DIR, "coop_bridge_resp.json")
+CUPHEAD_REG_PATH = r"Software\Studio MDHR\Cuphead"
+
+
+def backup_cuphead_registry() -> dict:
+    saved = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CUPHEAD_REG_PATH, 0, winreg.KEY_READ) as key:
+            i = 0
+            while True:
+                try:
+                    name, val, regtype = winreg.EnumValue(key, i)
+                    saved[name] = (val, regtype)
+                    i += 1
+                except OSError:
+                    break
+    except OSError:
+        pass
+    return saved
+
+
+def restore_cuphead_registry(saved: dict) -> None:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, CUPHEAD_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
+            for name, (val, regtype) in saved.items():
+                try:
+                    winreg.SetValueEx(key, name, 0, regtype, val)
+                except OSError:
+                    pass
+            # Ensure Screenmanager resolution in Registry is never left at 640x360
+            winreg.SetValueEx(key, "Screenmanager Resolution Width_h182942802", 0, winreg.REG_DWORD, 1920)
+            winreg.SetValueEx(key, "Screenmanager Resolution Height_h2627697771", 0, winreg.REG_DWORD, 1080)
+            winreg.SetValueEx(key, "Screenmanager Is Fullscreen mode_h3981298716", 0, winreg.REG_DWORD, 1)
+    except OSError:
+        pass
 
 
 def bridge_cmd(cmd: str, timeout: float = 5.0) -> dict:
@@ -45,10 +80,10 @@ def bridge_cmd(cmd: str, timeout: float = 5.0) -> dict:
 
 
 def build_handshake_payload(epoch: int = 1, rng_seed: int = 424242) -> bytes:
-    # PacketType.Handshake = 1, ProtocolVersion = 2, epoch, rng_seed, pWep, sWep, super, charm, hasDlc=1, stage=0 (Hello), version="1.1.0"
+    # PacketType.Handshake = 1, ProtocolVersion = 2, epoch, rng_seed, pWep, sWep, super, charm, hasDlc=1, stage=0 (Hello), version="1.2.0"
     return (
         struct.pack("<BIIiiiiiBB", 1, 2, epoch, rng_seed, 1456773641, 0, 1456815409, 1522153206, 1, 0)
-        + b"\x051.1.0"
+        + b"\x051.2.0"
     )
 
 
@@ -113,6 +148,7 @@ def main() -> int:
     ]
 
     print("[QA] Launching isolated Cuphead test instance (1.3.4)...")
+    reg_backup = backup_cuphead_registry()
     proc = subprocess.Popen(args, cwd=TEST_INSTALL_DIR)
 
     try:
@@ -215,6 +251,19 @@ def main() -> int:
         assert edge.get("knockoutGateVerified") is True, "Expected Knockout Gate & LevelWin sync packet"
         assert edge.get("localizationVerified") is True, "Expected dynamic PT-BR / EN localization detection & manual toggle"
         assert edge.get("updateCheckParserVerified") is True, "Expected GitHub release JSON parser & version comparator"
+        assert edge.get("mapBridgeRefreshVerified") is True, "Expected MapBridgeRefresh to preserve empty _levels obstacles and enable completed _levels"
+        assert edge.get("noDeadPlayerCloneVerified") is True, "Expected no duplicate player clone when PlayerTwo is dead"
+        assert edge.get("remoteDamageGuardAndDeathSyncVerified") is True, "Expected remote puppet local damage disabled and PlayerDeath event valid"
+        assert edge.get("bossPatternRngSyncVerified") is True, "Expected deterministic Boss LevelProperties attack pattern RNG sync"
+        assert edge.get("richPresenceVerified") is True, "Expected Dynamic Steam Rich Presence formatting (PT-BR & EN)"
+        assert edge.get("copyLogVerified") is True, "Expected Copy Log to clipboard to succeed"
+        assert edge.get("npcDialogueAutoPosVerified") is True, "Expected NPC & Ms. Chalice Dialogue auto-positioning and Interactor.Either"
+        assert edge.get("staleDeathRetryGuardVerified") is True, "Expected Retry stale death guard and invisible spirit self-healing"
+        assert edge.get("v130PacketsVerified") is True, "Expected BossPhaseChange, MausoleumGhostParried, and MapLevelSelectSync packets valid"
+
+        with open(LOG_FILE, "r", encoding="utf-8") as lf:
+            log_text = lf.read()
+        assert "[CupheadCoopV1.3.0]" in log_text, "Expected [CupheadCoopV1.3.0] version tag in CupheadCoop.log"
 
         print("RESULT: PASS")
         return 0
@@ -226,6 +275,7 @@ def main() -> int:
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        restore_cuphead_registry(reg_backup)
 
 
 if __name__ == "__main__":

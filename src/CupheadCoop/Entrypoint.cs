@@ -174,8 +174,8 @@ namespace CupheadCoop
         {
             try
             {
-                string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] [CupheadCoop] {1}{2}",
-                    DateTime.Now, message, Environment.NewLine);
+                string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] [CupheadCoopV{1}] {2}{3}",
+                    DateTime.Now, CoopProtocol.ModVersion, message, Environment.NewLine);
                 File.AppendAllText(_logPath, line);
             }
             catch
