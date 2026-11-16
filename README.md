@@ -29,10 +29,13 @@
 - **🔄 Complete Gameplay Synchronization:**
   - **Symmetric Level-Start Barrier (`LevelReadyGate`):** If one player's PC loads a boss stage faster than the other, the fight waits until both players finish loading so both timelines start on the exact same millisecond.
   - **Shared Visual Pause Menu (`PauseSync`):** Pausing or unpausing during a level or on the World Map opens and closes the visual pause menu on both players' screens simultaneously.
-  - **World Map Boss Title Card & Difficulty Selection Sync (`MapLevelSelectSync`):** When either player interacts with a level on the World Map, both players see the boss title card and watch the difficulty cursor (`Simple` / `Regular` / `Expert`) move in real time.
-  - **NPC & Ms. Chalice Dialogue Auto-Positioning:** Automatically positions the remote partner puppet during NPC dialogues (Elder Kettle, Saltbaker's Bakery, Ms. Chalice in Mausoleum, King's Leap) so Player 1 never freezes waiting for Player 2 to walk over.
-  - **Mausoleum Ghost & Parry Sync:** Synchronizes Mausoleum ghost waves, mirrors ghost parries across both screens, and prevents false client-side Game Over screens.
-  - **Two-Way Scene & Retry Controls (`SceneRequestSync`):** Either player (Host or Client) can trigger Retry/Restart (with stale-death packet filtering & invisible spirit self-healing), Return to Map, or enter a stage from the World Map. Returning to the Main Menu automatically closes the lobby cleanly.
+  - **World Map Boss Title Card & Difficulty Selection Sync (`MapLevelSelectSync`):** When either player interacts with a level on the World Map, both players see the boss title card and watch the difficulty cursor (`Simple` / `Regular` / `Expert`) move in real time (without UI flashing when canceling).
+  - **World Map Equip Menu Sync (`EquipMenuSync`):** Opening the Equip Menu opens it for both players, displays Player 2's unlocked and selected abilities (`MapEquipUICardFront.Refresh`), mirrors card flips and cursors in real time, waits for both to confirm, and refreshes the DLC boatman after Mausoleum I.
+  - **Porkrind's Shop Co-Wait (`ShopStateSync`):** Both players browse independently in Porkrind's Emporium, and the shop waits until both press Exit before returning to the World Map.
+  - **NPC & Ms. Chalice Dialogue Sync (`DialogueSync`):** Synchronizes NPC dialogues across both PCs and positions both players at exact world coordinates (Elder Kettle, Saltbaker's Bakery, Ms. Chalice in Mausoleum, King's Leap) so neither player freezes waiting to move.
+  - **Mausoleum Ghost, Parry & Victory Sync (`MausoleumGhostSync`):** Host-authoritative ghost waves, mirrored ghost parries across both screens, synchronized `OnPreWin` Ms. Chalice cutscene, and false client-side Game Over prevention.
+  - **Run-n-Gun, Airplane & Boss Summon Enemy Sync (`EnemySync` & `SpawnerTriggerSync`):** Synchronizes enemy spawner triggers, enemy/minion positions, HP, deaths, and Client-to-Host damage reports (including homing carrots in The Root Pack), plus full Airplane basic shot / Retry synchronization.
+  - **Two-Way Scene & Retry Controls (`SceneRequestSync`):** Either player (Host or Client) can trigger Retry/Restart (with stale-death packet filtering & invisible spirit self-healing), Return to Map, or enter a stage from the World Map. Returning to the Main Menu automatically closes the lobby cleanly and halts any residual movement.
   - **In-Memory World Map & Dialoguer Mirror (`WorldSaveMirror`):** Mirrors the Host's World Map state (bridges, boss completion flags, NPC dialogues via `Dialoguer`) in the Client's RAM while protecting the Client's personal local save files on disk from being overwritten.
   - **Bosses, Properties & Knockout Gate:** Synchronizes boss `AbstractLevelProperties` HP, timeline progress, phase transitions, deterministic RNG seeds, and a synchronized `KNOCKOUT!` gate (`LevelOutcomeSync`).
   - **Run & Gun Stages:** Coins (`LevelCoin`) collected by either player are awarded to both (`5/5`).
@@ -55,7 +58,7 @@
 
 > **Note:** Both you and your friend must have a legitimate copy of Cuphead on Steam.
 
-1. Download the latest `CupheadCoop-v1.3.0.zip` from the [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) page (or from [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
+1. Download the latest `CupheadCoop-v1.3.2.zip` from the [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) page (or from [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
 2. Extract the contents of the `.zip` directly into your Cuphead game folder:
    - Default Steam path: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verify that the following files are present in the folder next to `Cuphead.exe`:
@@ -134,6 +137,9 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /noconfig /targe
   /r:<managed_dir>\UnityEngine.CoreModule.dll `
   /r:<managed_dir>\UnityEngine.IMGUIModule.dll `
   /r:<managed_dir>\UnityEngine.UI.dll `
+  /r:<managed_dir>\UnityEngine.UnityWebRequestModule.dll `
+  /r:<managed_dir>\UnityEngine.JSONSerializeModule.dll `
+  /r:<managed_dir>\UnityEngine.TextRenderingModule.dll `
   /r:<managed_dir>\UnityEngine.AudioModule.dll `
   /r:<managed_dir>\UnityEngine.Physics2DModule.dll `
   /r:<managed_dir>\UnityEngine.AnimationModule.dll `

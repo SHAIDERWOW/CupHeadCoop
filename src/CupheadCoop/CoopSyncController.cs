@@ -35,6 +35,7 @@ namespace CupheadCoop
         private bool _wasRemoteParrying;
         private bool _wasRemotePlaneShrunk;
         private bool _wasRemotePlaneShooting;
+        private int _lastSentPlaneWeaponId;
 
         // Real-time Loadout & Inventory tracking
         private int _lastSentPrimaryWep;
@@ -64,6 +65,8 @@ namespace CupheadCoop
         private float _lastClientRequestTime = -100f;
         private bool _clientInitiatedReload;
         private float _clientInitiatedReloadTime = -100f;
+        private float _ignoreClientSceneRequestUntilTime = -100f;
+        private bool _hasEnteredGameplayScene;
 
         // 4. WorldSaveMirror + Dialoguer in-RAM state (protects Client disk saves)
         private ushort _nextMirrorId = 1;
@@ -110,7 +113,7 @@ namespace CupheadCoop
         private bool _sentMausoleumLose;
         private readonly HashSet<int> _parriedMausoleumGhostIds = new HashSet<int>();
 
-        // 11. Map Level Select / Difficulty UI Sync State (v1.3.0)
+        // 11. Map Level Select / Difficulty UI Sync State (v1.3.0 / v1.3.2)
         private bool _applyingRemoteMapStartUi;
         private bool _isRemoteMapStartUiOpen;
         private byte _remoteMapStartUiKind;
@@ -119,6 +122,47 @@ namespace CupheadCoop
         private string _lastSentMapStartLevel = string.Empty;
         private int _lastSentMapStartDiff = -1;
         private int _lastSentMapStartCursor = -1;
+        private float _ignoreLocalMapStartUiOpenUntilTime = -100f;
+
+        // 12. Dialogue Sync State (v1.3.2 - Issue #1 & #5)
+        private bool _applyingRemoteDialogue;
+        private readonly HashSet<int> _activeDialogueInstanceIds = new HashSet<int>();
+        private readonly Dictionary<int, float> _dialogueStartTimeByInstanceId = new Dictionary<int, float>();
+
+        // 13. Map Equip Menu Sync State (v1.3.2 - Issue #8)
+        private bool _applyingRemoteEquipMenu;
+        private bool _wasLocalEquipMenuOpen;
+        private bool _isRemoteEquipMenuOpen;
+        private float _ignoreLocalEquipMenuUntilTime = -100f;
+        private byte _lastSentEquipSide = 255;
+        private byte _lastSentEquipBack = 255;
+        private byte _lastSentEquipSlot = 255;
+        private int _lastSentEquipFrontIdx = -1;
+        private int _lastSentEquipBackIdx = -1;
+        private bool _lastSentEquipReady;
+
+        // 14. Shop Scene Co-Wait Sync State (v1.3.2 - Issue #11)
+        private bool _applyingRemoteShopState;
+        private byte _lastSentShopState = 255;
+        private int _lastSentShopItemIdx = -1;
+        private bool _lastSentShopExiting;
+
+        // 15. Mausoleum Ghost & Enemy/Minion Sync State (v1.3.2 - Issue #5 & #10)
+        private readonly Dictionary<int, MausoleumLevelGhostBase> _clientBoundMausoleumGhosts = new Dictionary<int, MausoleumLevelGhostBase>();
+        private readonly HashSet<int> _startedSpawnerHashes = new HashSet<int>();
+        private readonly HashSet<int> _endedSpawnerHashes = new HashSet<int>();
+        private readonly Dictionary<int, float> _clientEnemyLastHostSeenTime = new Dictionary<int, float>();
+        private readonly Dictionary<int, float> _clientEnemySpawnGraceTime = new Dictionary<int, float>();
+        private readonly Dictionary<int, float> _hostEnemyLastKnownHp = new Dictionary<int, float>();
+        private readonly Dictionary<int, Vector2> _hostEnemyLastKnownPos = new Dictionary<int, Vector2>();
+        private readonly Dictionary<int, int> _hostEnemyLastKnownType = new Dictionary<int, int>();
+        private readonly HashSet<int> _killedEnemyKeys = new HashSet<int>();
+        private readonly Dictionary<int, float> _clientEnemyLastReportedHp = new Dictionary<int, float>();
+
+        // 16. World Map Facing & Diagnostic Logging State (v1.3.2 - Issue #12 & Rich Logs)
+        private sbyte _lastRemoteMapFacingX;
+        private sbyte _lastRemoteMapFacingY = -1;
+        private float _lastTetherLogTime = -100f;
 
         // DeathEffect & LevelCoin & KingDice tracking
         private readonly HashSet<int> _processedDeathEffects = new HashSet<int>();
@@ -250,15 +294,67 @@ namespace CupheadCoop
             _transport.Send(handshake, true);
         }
 
+        public string FormatSceneAndLevelContext(string sceneName, int levelId, int difficultyMode)
+        {
+            string friendlyScene = sceneName ?? "unknown_scene";
+            if (friendlyScene == "scene_map_world_1") friendlyScene = "Inkwell Isle I (World Map 1)";
+            else if (friendlyScene == "scene_map_world_2") friendlyScene = "Inkwell Isle II (World Map 2)";
+            else if (friendlyScene == "scene_map_world_3") friendlyScene = "Inkwell Isle III (World Map 3)";
+            else if (friendlyScene == "scene_map_world_4") friendlyScene = "Inkwell Hell (World Map 4)";
+            else if (friendlyScene == "scene_map_world_DLC") friendlyScene = "Inkwell Isle IV (DLC World Map)";
+            else if (friendlyScene == "scene_shop") friendlyScene = "Porkrind's Emporium (Shop)";
+            else if (friendlyScene == "scene_shop_DLC") friendlyScene = "Porkrind's Emporium (DLC Shop)";
+            else if (friendlyScene == "scene_level_house_elder_kettle") friendlyScene = "Elder Kettle's House";
+            else if (friendlyScene == "scene_level_kitchen") friendlyScene = "Chef Saltbaker's Bakery";
+
+            string lvlLabel = "None";
+            if (levelId != 0 && Enum.IsDefined(typeof(Levels), levelId))
+            {
+                lvlLabel = ((Levels)levelId).ToString();
+            }
+            else if (Level.Current != null)
+            {
+                lvlLabel = Level.Current.CurrentLevel.ToString();
+            }
+
+            string diffLabel = "Regular";
+            if (Enum.IsDefined(typeof(Level.Mode), difficultyMode))
+            {
+                Level.Mode m = (Level.Mode)difficultyMode;
+                diffLabel = (m == Level.Mode.Easy) ? "Simple" : (m == Level.Mode.Hard ? "Expert" : "Regular");
+            }
+
+            return string.Format(
+                "{0} [raw={1}, level={2}, diff={3}, role={4}, LocalDLC={5}, PartnerDLC={6}, BothDLC={7}]",
+                friendlyScene,
+                sceneName ?? string.Empty,
+                lvlLabel,
+                diffLabel,
+                _transport.Role,
+                IsLocalDlcEnabled(),
+                _remoteHasDlc,
+                BothPlayersHaveDlc);
+        }
+
         private void OnPeerDisconnected()
         {
             _handshakeCompleted = false;
+            _wasLocalShooting = false;
+            _wasRemoteParrying = false;
+            _wasRemotePlaneShrunk = false;
+            _wasRemotePlaneShooting = false;
+            _isRemoteEquipMenuOpen = false;
+            _wasLocalEquipMenuOpen = false;
             ReleaseLevelReadyGate();
             if (_isPausedByPauseSync)
             {
                 ApplyRemotePauseSync(false);
             }
             _isPausedByPauseSync = false;
+
+            // Issue #12 (v1.3.2): Immediately halt any residual movement/velocity/animator state on both players
+            // so neither character continues walking or sliding forward when a peer leaves or drops!
+            StopAllResidualPlayerMovement();
 
             if (_transport.Role == CoopRole.None && _transport.AutoReconnectAttemptsLeft == 0)
             {
@@ -267,33 +363,94 @@ namespace CupheadCoop
                 {
                     PlayerManager.PlayerLeave(PlayerId.PlayerTwo);
                     PlayerManager.Multiplayer = false;
+                    if (Map.Current != null && Map.Current.players != null && Map.Current.players.Length > 1 && Map.Current.players[1] != null)
+                    {
+                        UnityEngine.Object.Destroy(Map.Current.players[1].gameObject);
+                    }
                 }
                 catch { }
             }
             RestoreDefaultInputs();
+            CupheadCoopBootstrapper.Log("[CoopDiag] Peer disconnected (role=" + _transport.Role + ", reconnectLeft=" + _transport.AutoReconnectAttemptsLeft + "). Restored inputs and stopped motion.");
         }
 
         public void OnSceneLoaded(string sceneName)
         {
             EnsureOnlineWrapper();
 
-            // Issue #6 (v1.3.0): Returning to the Main Menu or Slot Select automatically closes the lobby
-            if (sceneName == "scene_title" || sceneName == "scene_slot_select")
+            // Issue #6 (v1.3.1): Returning to the Title Screen after entering gameplay automatically closes the lobby.
+            // Never close the lobby on scene_slot_select (where the Host selects which save slot to load!).
+            if (sceneName == "scene_title")
             {
-                if (_transport.IsConnected || _transport.Role != CoopRole.None)
+                if (_hasEnteredGameplayScene && (_transport.IsConnected || _transport.Role != CoopRole.None))
                 {
-                    CupheadCoopBootstrapper.Log("Returned to Main Menu (" + sceneName + "); automatically closing Co-op lobby.");
+                    _hasEnteredGameplayScene = false;
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Returned to Main Menu (" + sceneName + "); automatically closing Co-op lobby.");
                     _transport.Disconnect();
                 }
                 return;
             }
 
+            if (Map.Current != null || Level.Current != null)
+            {
+                _hasEnteredGameplayScene = true;
+            }
+
             if (!_transport.IsConnected)
                 return;
+
+            // Ensure PauseManager is never left stuck in Paused state when transitioning scenes from the Pause Menu
+            if (PauseManager.state == PauseManager.State.Paused && !_waitingAtLevelReadyGate)
+            {
+                PauseManager.Unpause();
+            }
+
+            // Hard DLC Scene Redirect (v1.3.1): If the Client loaded a DLC scene locally while !BothPlayersHaveDlc,
+            // immediately bounce back to the Host's current map scene so the Client never gets stranded on the DLC island!
+            if (_transport.Role == CoopRole.Client && !BothPlayersHaveDlc && IsDlcSceneOrLevel(sceneName, (int)SceneLoader.CurrentLevel))
+            {
+                _lastDlcWarning = "BLOQUEADO: O Host nao possui a DLC! Retornando para a ilha do Host.";
+                CupheadCoopBootstrapper.Log(_lastDlcWarning);
+                string fallbackScene = !string.IsNullOrEmpty(_lastSyncedScene) && !IsDlcSceneOrLevel(_lastSyncedScene, 0)
+                    ? _lastSyncedScene
+                    : "scene_map_world_1";
+                _ignoreClientSceneRequestUntilTime = Time.unscaledTime + 4.0f;
+                _applyingRemoteSceneLoad = true;
+                try
+                {
+                    SceneLoader.LoadScene(fallbackScene, SceneLoader.Transition.Iris, SceneLoader.Transition.Iris, SceneLoader.Icon.Hourglass, null);
+                }
+                catch { }
+                finally
+                {
+                    _applyingRemoteSceneLoad = false;
+                }
+                return;
+            }
+
+            // Issue #9 (v1.3.2): Reset all local/remote weapon & action edge-tracking flags on scene load / Retry
+            // so Player 2's airplane and ground basic shots always resume firing after restarting a level!
+            _wasLocalShooting = false;
+            _wasRemoteParrying = false;
+            _wasRemotePlaneShrunk = false;
+            _wasRemotePlaneShooting = false;
+            _lastSentPlaneWeaponId = 0;
 
             _processedDeathEffects.Clear();
             _syncedCoinHashes.Clear();
             _parriedMausoleumGhostIds.Clear();
+            _clientBoundMausoleumGhosts.Clear();
+            _activeDialogueInstanceIds.Clear();
+            _dialogueStartTimeByInstanceId.Clear();
+            _startedSpawnerHashes.Clear();
+            _endedSpawnerHashes.Clear();
+            _clientEnemyLastHostSeenTime.Clear();
+            _clientEnemySpawnGraceTime.Clear();
+            _hostEnemyLastKnownHp.Clear();
+            _hostEnemyLastKnownPos.Clear();
+            _hostEnemyLastKnownType.Clear();
+            _killedEnemyKeys.Clear();
+            _clientEnemyLastReportedHp.Clear();
             _hookedMausoleumInstanceId = 0;
             _sentMausoleumLose = false;
             _lastSyncedDiceInstanceId = 0;
@@ -304,12 +461,24 @@ namespace CupheadCoop
             _lastSentBossPropertiesHp = -1f;
             _wasLocalPauseGuiOpen = false;
             _isPausedByPauseSync = false;
+            _wasLocalEquipMenuOpen = false;
+            _isRemoteEquipMenuOpen = false;
+            _lastSentEquipSide = 255;
+            _lastSentShopState = 255;
+            _lastSentShopItemIdx = -1;
             _wasLocalMapStartUiOpen = false;
             _isRemoteMapStartUiOpen = false;
             _remoteMapStartUiKind = 0;
             _lastSentMapStartUiKind = 0;
+            _remoteReadyForLevelId = -1;
+            _lastRemoteMapFacingX = 0;
+            _lastRemoteMapFacingY = -1;
             SetIgnoreRemoteDeathWindow(2.5f);
 
+            int currentModeInt = Level.Current != null ? (int)Level.Current.mode : (int)Level.CurrentMode;
+            CupheadCoopBootstrapper.Log("[CoopDiag] SceneLoaded: " + FormatSceneAndLevelContext(sceneName, (int)SceneLoader.CurrentLevel, currentModeInt));
+
+            NormalizeAllMapPlayerPositions();
             ForceMultiplayerPlayerTwoJoined();
             MirrorAndSyncPlayerInventories(false);
             ConfigureLocalAndRemoteInputs();
@@ -320,6 +489,15 @@ namespace CupheadCoop
                 _lastTrackedMapInstanceId = Map.Current.GetInstanceID();
                 _mapSceneEnteredTime = Time.unscaledTime;
                 _pendingMapObstacleRefresh = true;
+                EnforceMapPlayersAndCameraTether(true);
+                if (!BothPlayersHaveDlc)
+                {
+                    DisableDlcBoatmanOnMap();
+                }
+                else
+                {
+                    RefreshDlcBoatmanOnMapIfUnlocked();
+                }
                 if (_transport.Role == CoopRole.Host)
                 {
                     SendWorldSaveMirror();
@@ -377,20 +555,22 @@ namespace CupheadCoop
 
         /// <summary>
         /// Runs every Unity Update() frame (even while paused by PauseManager!) so LevelReadyGate,
-        /// PauseSync, MapLevelSelectSync, DialogueSync, and Client SceneLoader monitoring respond immediately.
+        /// PauseSync, EquipMenuSync, ShopStateSync, MapLevelSelectSync, DialogueSync, and Client SceneLoader monitoring respond immediately.
         /// </summary>
         public void UpdateSync()
         {
             EnsureOnlineWrapper();
             MonitorMapPostWinAndObstacles();
 
-            // Issue #6 (v1.3.0): Immediately close lobby if either Host or Client begins loading the Main Menu / Slot Select
-            if ((_transport.IsConnected || _transport.Role != CoopRole.None) && SceneLoader.Exists && SceneLoader.CurrentlyLoading)
+            // Issue #6 (v1.3.1): Immediately close lobby if either Host or Client begins exiting to the Title Screen
+            // after having entered gameplay (never close on scene_slot_select!).
+            if (_hasEnteredGameplayScene && (_transport.IsConnected || _transport.Role != CoopRole.None) && SceneLoader.Exists && SceneLoader.CurrentlyLoading)
             {
                 string loadingScene = SceneLoader.SceneName ?? string.Empty;
-                if (loadingScene == "scene_title" || loadingScene == "scene_slot_select")
+                if (loadingScene == "scene_title")
                 {
-                    CupheadCoopBootstrapper.Log("Loading Main Menu (" + loadingScene + "); automatically closing Co-op lobby.");
+                    _hasEnteredGameplayScene = false;
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Loading Main Menu (" + loadingScene + "); automatically closing Co-op lobby.");
                     _transport.Disconnect();
                     return;
                 }
@@ -401,6 +581,8 @@ namespace CupheadCoop
 
             UpdateLevelReadyGate();
             MonitorPauseSync();
+            MonitorEquipMenuSync();
+            MonitorShopSceneSync();
             MonitorActiveDialoguesAndInteractions(false);
             MonitorMapLevelSelectSync();
             MonitorClientSceneRequests();
@@ -418,6 +600,8 @@ namespace CupheadCoop
             EnsureLevelHooks();
             UpdateLevelReadyGate();
             MonitorPauseSync();
+            MonitorEquipMenuSync();
+            MonitorShopSceneSync();
             MonitorActiveDialoguesAndInteractions(_localTick % 15 == 0);
             MonitorMapLevelSelectSync();
 
@@ -434,6 +618,7 @@ namespace CupheadCoop
             MonitorDeathEffectsAndRevives();
             MonitorKingDiceBoard();
             MonitorMausoleumLevel();
+            MonitorEnemiesAndSpawners();
             MonitorBossHealthAndKnockoutGate();
 
             SendLocalPlayerState();
@@ -478,10 +663,11 @@ namespace CupheadCoop
 
         private void UpdateLevelReadyGate()
         {
-            if (Level.Current != null && Level.Current.Initialized && _transport.IsConnected)
+            if (Level.Current != null && _transport.IsConnected)
             {
                 int currentLvlId = (int)Level.Current.CurrentLevel;
-                if (Time.unscaledTime >= _nextLevelReadyBroadcastTime && (_waitingAtLevelReadyGate || _nextLevelReadyBroadcastTime == 0f))
+                bool keepBroadcastingAfterRelease = _levelReadyGateStartTime > 0f && (Time.unscaledTime - _levelReadyGateStartTime) < 2.5f;
+                if (Time.unscaledTime >= _nextLevelReadyBroadcastTime && (_waitingAtLevelReadyGate || keepBroadcastingAfterRelease || _nextLevelReadyBroadcastTime == 0f))
                 {
                     _nextLevelReadyBroadcastTime = Time.unscaledTime + 0.35f;
                     byte[] readyPkt = CoopProtocol.BuildLevelEvent(
@@ -523,11 +709,22 @@ namespace CupheadCoop
 
         public void ReleaseLevelReadyGate()
         {
+            bool wasWaiting = _waitingAtLevelReadyGate;
             _waitingAtLevelReadyGate = false;
             SetIgnoreRemoteDeathWindow(2.0f);
             if (Level.Current != null)
             {
                 SynchronizeBossPropertiesRng(_currentRngSeed);
+                if (wasWaiting && _transport.IsConnected)
+                {
+                    byte[] readyPkt = CoopProtocol.BuildLevelEvent(
+                        LevelEventType.LevelReady,
+                        (byte)GetLocalPlayerId(),
+                        _sceneLoadSequence,
+                        _transport.Role == CoopRole.Host ? (float)_currentRngSeed : 0f,
+                        (int)Level.Current.CurrentLevel);
+                    _transport.Send(readyPkt, true);
+                }
             }
             if (_gatePausedGameplay)
             {
@@ -826,17 +1023,24 @@ namespace CupheadCoop
             try
             {
                 bool currentlyLoading = SceneLoader.Exists && SceneLoader.CurrentlyLoading;
-                if (currentlyLoading && !_wasSceneLoaderLoading && !_applyingRemoteSceneLoad)
+                if (currentlyLoading && !_wasSceneLoaderLoading && !_applyingRemoteSceneLoad && Time.unscaledTime >= _ignoreClientSceneRequestUntilTime)
                 {
                     _wasSceneLoaderLoading = true;
                     string targetScene = SceneLoader.SceneName ?? string.Empty;
                     int targetLevel = (int)SceneLoader.CurrentLevel;
                     int targetMode = (int)Level.CurrentMode;
+                    string activeScene = SceneManager.GetActiveScene().name;
 
-                    if (targetScene == "scene_title" || targetScene == "scene_slot_select" || targetScene == "scene_start")
+                    if (targetScene == "scene_title" && _hasEnteredGameplayScene)
                     {
                         // Guest chose "Exit to Title" -> leave session cleanly
+                        _hasEnteredGameplayScene = false;
                         _transport.Disconnect();
+                        return;
+                    }
+
+                    if (targetScene == "scene_slot_select" || targetScene == "scene_start")
+                    {
                         return;
                     }
 
@@ -844,10 +1048,28 @@ namespace CupheadCoop
                     {
                         _lastDlcWarning = "BLOQUEADO: O Host nao possui a DLC! Fase da DLC cancelada.";
                         CupheadCoopBootstrapper.Log(_lastDlcWarning);
+                        if (!string.IsNullOrEmpty(activeScene) && !IsDlcSceneOrLevel(activeScene, 0))
+                        {
+                            _ignoreClientSceneRequestUntilTime = Time.unscaledTime + 3.5f;
+                            _applyingRemoteSceneLoad = true;
+                            try
+                            {
+                                SceneLoader.LoadScene(activeScene, SceneLoader.Transition.Iris, SceneLoader.Transition.Iris, SceneLoader.Icon.Hourglass, null);
+                            }
+                            catch { }
+                            finally
+                            {
+                                _applyingRemoteSceneLoad = false;
+                            }
+                        }
                         return;
                     }
 
-                    string activeScene = SceneManager.GetActiveScene().name;
+                    if (Map.Current != null)
+                    {
+                        SyncMapReturnPositionsFromActivePlayers();
+                    }
+
                     SceneRequestKind kind = SceneRequestKind.LoadScene;
                     if (targetScene == activeScene && Level.Current != null)
                     {
@@ -897,6 +1119,11 @@ namespace CupheadCoop
 
             try
             {
+                if (Map.Current != null)
+                {
+                    SyncMapReturnPositionsFromActivePlayers();
+                }
+
                 CupheadCoopBootstrapper.Log("Host executing Client SceneRequest: " + kind + " (" + sceneName + ", level=" + (Levels)levelId + ")");
                 switch (kind)
                 {
@@ -957,6 +1184,12 @@ namespace CupheadCoop
 
             try
             {
+                if (Map.Current != null)
+                {
+                    SyncMapReturnPositionsFromActivePlayers();
+                }
+                NormalizeAllMapPlayerPositions();
+
                 string dialoguerXml = string.Empty;
                 if (Dialoguer.ready)
                 {
@@ -1094,6 +1327,7 @@ namespace CupheadCoop
                 }
 
                 PlayerData.inGame = true;
+                NormalizeAllMapPlayerPositions();
 
                 // Restore PlayerTwo's equipped loadout
                 PlayerData.PlayerLoadouts.PlayerLoadout newP2Loadout = PlayerData.Data.Loadouts.GetPlayerLoadout(PlayerId.PlayerTwo);
@@ -1114,6 +1348,15 @@ namespace CupheadCoop
                 MirrorAndSyncPlayerInventories(false);
                 if (Map.Current != null)
                 {
+                    EnforceMapPlayersAndCameraTether(true);
+                    if (!BothPlayersHaveDlc)
+                    {
+                        DisableDlcBoatmanOnMap();
+                    }
+                    else
+                    {
+                        RefreshDlcBoatmanOnMapIfUnlocked();
+                    }
                     bool winTransitionActive = Level.Won
                         || Map.Current.CurrentState != Map.State.Ready
                         || (AbstractMapLevelDependentEntity.RegisteredEntities != null && AbstractMapLevelDependentEntity.RegisteredEntities.Count > 0);
@@ -1133,6 +1376,230 @@ namespace CupheadCoop
             {
                 CupheadCoopBootstrapper.Log("ApplyWorldSaveMirrorBytes warning: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// On saves progressed in singleplayer, CurrentMapData.playerOnePosition is updated at the latest boss while
+        /// CurrentMapData.playerTwoPosition remains back at the island entrance (or (0,0)). When loaded in Multiplayer,
+        /// CupheadMapCamera centers at (P1 + P2) / 2, placing both players off-screen outside CupheadMapCamera.edgeCollider!
+        /// This method ensures playerTwoPosition is always right next to playerOnePosition across all map data objects.
+        /// </summary>
+        public static bool NormalizeAllMapPlayerPositions()
+        {
+            if (!PlayerData.Initialized || PlayerData.Data == null)
+                return false;
+
+            bool normalizedAny = false;
+            try
+            {
+                Scenes[] mapScenes = new Scenes[]
+                {
+                    Scenes.scene_map_world_1,
+                    Scenes.scene_map_world_2,
+                    Scenes.scene_map_world_3,
+                    Scenes.scene_map_world_4,
+                    Scenes.scene_map_world_DLC
+                };
+
+                for (int i = 0; i < mapScenes.Length; i++)
+                {
+                    PlayerData.MapData md = PlayerData.Data.GetMapData(mapScenes[i]);
+                    if (md == null || !md.sessionStarted)
+                        continue;
+
+                    Vector3 p1 = md.playerOnePosition;
+                    Vector3 p2 = md.playerTwoPosition;
+                    if (p1 != Vector3.zero && (p2 == Vector3.zero || Vector2.Distance(new Vector2(p1.x, p1.y), new Vector2(p2.x, p2.y)) > 3.0f))
+                    {
+                        md.playerTwoPosition = new Vector3(p1.x + 0.6f, p1.y, p1.z);
+                        normalizedAny = true;
+                    }
+                }
+            }
+            catch { }
+            return normalizedAny;
+        }
+
+        public static void SyncMapReturnPositionsFromActivePlayers()
+        {
+            if (Map.Current == null || Map.Current.players == null || !PlayerData.Initialized || PlayerData.Data == null)
+                return;
+
+            try
+            {
+                PlayerData.MapData md = PlayerData.Data.CurrentMapData;
+                if (md == null)
+                    return;
+
+                MapPlayerController p0 = Map.Current.players.Length > 0 ? Map.Current.players[0] : null;
+                MapPlayerController p1 = Map.Current.players.Length > 1 ? Map.Current.players[1] : null;
+                MapPlayerController anchor = p0 != null ? p0 : p1;
+                if (anchor != null)
+                {
+                    Vector3 pos = anchor.transform.position;
+                    md.sessionStarted = true;
+                    md.playerOnePosition = pos;
+                    md.playerTwoPosition = new Vector3(pos.x + 0.6f, pos.y, pos.z);
+                }
+            }
+            catch { }
+        }
+
+        public bool EnforceMapPlayersAndCameraTether(bool snapToSavedDataPosition)
+        {
+            if (Map.Current == null || Map.Current.players == null || Map.Current.players.Length < 2)
+                return false;
+
+            bool adjusted = false;
+            try
+            {
+                MapPlayerController p0 = Map.Current.players[0];
+                MapPlayerController p1 = Map.Current.players[1];
+                if (p0 == null || p1 == null)
+                    return false;
+
+                // Ensure sprite renderers are visible when not in a mid-join portal jump
+                for (int i = 0; i < 2; i++)
+                {
+                    MapPlayerController mp = Map.Current.players[i];
+                    if (mp != null && mp.animationController != null && mp.animationController.spriteRenderer != null && !mp.animationController.spriteRenderer.enabled)
+                    {
+                        mp.animationController.spriteRenderer.enabled = true;
+                    }
+                }
+
+                if (snapToSavedDataPosition && PlayerData.Initialized && PlayerData.Data != null && PlayerData.Data.CurrentMapData != null)
+                {
+                    PlayerData.MapData md = PlayerData.Data.CurrentMapData;
+                    if (md.sessionStarted && md.playerOnePosition != Vector3.zero)
+                    {
+                        Vector3 savedP1 = md.playerOnePosition;
+                        if (Vector2.Distance(new Vector2(p0.transform.position.x, p0.transform.position.y), new Vector2(savedP1.x, savedP1.y)) > 3.5f)
+                        {
+                            p0.transform.position = new Vector3(savedP1.x, savedP1.y, p0.transform.position.z);
+                            adjusted = true;
+                        }
+                        if (Vector2.Distance(new Vector2(p1.transform.position.x, p1.transform.position.y), new Vector2(savedP1.x, savedP1.y)) > 3.5f)
+                        {
+                            p1.transform.position = new Vector3(savedP1.x + 0.6f, savedP1.y, p1.transform.position.z);
+                            adjusted = true;
+                        }
+                    }
+                }
+
+                // Continuous tether: CupheadMapCamera centers at (P1 + P2) / 2 and puts an edgeCollider around the screen.
+                // If P1 and P2 ever get > 9.5 units apart on the Map, both players end up outside the camera viewport!
+                float dist = Vector2.Distance(
+                    new Vector2(p0.transform.position.x, p0.transform.position.y),
+                    new Vector2(p1.transform.position.x, p1.transform.position.y));
+                if (dist > 9.5f)
+                {
+                    Vector3 anchor = p0.transform.position;
+                    p1.transform.position = new Vector3(anchor.x + 0.6f, anchor.y, p1.transform.position.z);
+                    adjusted = true;
+                }
+
+                if (adjusted && CupheadMapCamera.Current != null)
+                {
+                    Vector3 center = (p0.transform.position + p1.transform.position) * 0.5f;
+                    Vector3 camPos = CupheadMapCamera.Current.transform.position;
+                    CupheadMapCamera.Current.transform.position = new Vector3(center.x, center.y, camPos.z);
+                    MethodInfo updateCols = typeof(CupheadMapCamera).GetMethod("UpdateColliders", AllFlags);
+                    if (updateCols != null)
+                    {
+                        updateCols.Invoke(CupheadMapCamera.Current, null);
+                    }
+                }
+
+                if ((snapToSavedDataPosition || adjusted) && (Time.unscaledTime - _lastTetherLogTime) > 1.5f)
+                {
+                    _lastTetherLogTime = Time.unscaledTime;
+                    CupheadCoopBootstrapper.Log(string.Format(
+                        "[CoopDiag] MapPosition/Tether: P1=({0:F1},{1:F1}), P2=({2:F1},{3:F1}), dist={4:F1}, adjusted={5}",
+                        p0.transform.position.x, p0.transform.position.y,
+                        p1.transform.position.x, p1.transform.position.y,
+                        dist, adjusted));
+                }
+            }
+            catch { }
+            return adjusted;
+        }
+
+        public static int RefreshDlcBoatmanOnMapIfUnlocked()
+        {
+            int enabledCount = 0;
+            try
+            {
+                if (!PlayerData.Initialized || PlayerData.Data == null)
+                    return 0;
+
+                bool boatUnlocked = PlayerData.Data.hasUnlockedBoatman
+                    || PlayerData.Data.hasUnlockedFirstSuper
+                    || (PlayerData.Data.GetLevelData(Levels.Mausoleum) != null && PlayerData.Data.GetLevelData(Levels.Mausoleum).completed);
+                if (!boatUnlocked)
+                    return 0;
+
+                BoatmanEnabler[] boatmen = UnityEngine.Object.FindObjectsOfType<BoatmanEnabler>();
+                if (boatmen == null || boatmen.Length == 0)
+                    return 0;
+
+                MethodInfo onAlreadyMet = typeof(AbstractMapLevelDependentEntity).GetMethod("OnConditionAlreadyMet", AllFlags);
+                FieldInfo toEnableField = typeof(MapLevelDependentObstacle).GetField("ToEnable", AllFlags);
+                FieldInfo toDisableField = typeof(MapLevelDependentObstacle).GetField("ToDisable", AllFlags);
+
+                for (int i = 0; i < boatmen.Length; i++)
+                {
+                    BoatmanEnabler b = boatmen[i];
+                    if (b == null) continue;
+                    GameObject enGo = toEnableField != null ? toEnableField.GetValue(b) as GameObject : null;
+                    GameObject disGo = toDisableField != null ? toDisableField.GetValue(b) as GameObject : null;
+                    if (enGo != null && !enGo.activeSelf)
+                    {
+                        if (onAlreadyMet != null)
+                        {
+                            try { onAlreadyMet.Invoke(b, null); } catch { }
+                        }
+                        enGo.SetActive(true);
+                        if (disGo != null && disGo.activeSelf) disGo.SetActive(false);
+                        enabledCount++;
+                    }
+                }
+            }
+            catch { }
+            return enabledCount;
+        }
+
+        public static int DisableDlcBoatmanOnMap()
+        {
+            int disabledCount = 0;
+            try
+            {
+                BoatmanEnabler[] boatmen = UnityEngine.Object.FindObjectsOfType<BoatmanEnabler>();
+                if (boatmen == null || boatmen.Length == 0)
+                    return 0;
+
+                MethodInfo onNotMet = typeof(AbstractMapLevelDependentEntity).GetMethod("OnConditionNotMet", AllFlags);
+                FieldInfo toEnableField = typeof(MapLevelDependentObstacle).GetField("ToEnable", AllFlags);
+                FieldInfo toDisableField = typeof(MapLevelDependentObstacle).GetField("ToDisable", AllFlags);
+
+                for (int i = 0; i < boatmen.Length; i++)
+                {
+                    BoatmanEnabler b = boatmen[i];
+                    if (b == null) continue;
+                    b.StopAllCoroutines();
+                    if (onNotMet != null)
+                    {
+                        try { onNotMet.Invoke(b, null); } catch { }
+                    }
+                    GameObject enGo = toEnableField != null ? toEnableField.GetValue(b) as GameObject : null;
+                    GameObject disGo = toDisableField != null ? toDisableField.GetValue(b) as GameObject : null;
+                    if (enGo != null && enGo.activeSelf) enGo.SetActive(false);
+                    if (disGo != null && !disGo.activeSelf) disGo.SetActive(true);
+                    disabledCount++;
+                }
+            }
+            catch { }
+            return disabledCount;
         }
 
         private void BackupClientOriginalSavesOnce()
@@ -1217,6 +1684,44 @@ namespace CupheadCoop
                 {
                     _pendingMapObstacleRefresh = false;
                     RefreshMapObstacles();
+                }
+
+                if (_transport.IsConnected)
+                {
+                    EnforceMapPlayersAndCameraTether(false);
+                    if (!BothPlayersHaveDlc)
+                    {
+                        DisableDlcBoatmanOnMap();
+                    }
+                    else if (_localTick % 30 == 0)
+                    {
+                        RefreshDlcBoatmanOnMapIfUnlocked();
+                    }
+                }
+
+                // Issue #12 (v1.3.2): When entering or exiting a non-won location on the World Map (or joining),
+                // ensure neither player gets stuck spinning in the "Jump" animation state!
+                if (!Level.Won && Map.Current.players != null && elapsedOnMap > 0.2f)
+                {
+                    for (int i = 0; i < Map.Current.players.Length; i++)
+                    {
+                        MapPlayerController mp = Map.Current.players[i];
+                        if (mp == null || mp.animator == null)
+                            continue;
+                        AnimatorStateInfo st = mp.animator.GetCurrentAnimatorStateInfo(0);
+                        if (st.IsName("Jump") || st.IsName("WinChalice_Loop"))
+                        {
+                            if (mp.animator.GetInteger("X") == 0 && mp.animator.GetInteger("Y") == 0)
+                            {
+                                mp.animator.SetInteger("Y", -1);
+                            }
+                            mp.animator.SetTrigger("OnJumpComplete");
+                            if (mp.state == MapPlayerController.State.Stationary && Map.Current.CurrentState == Map.State.Ready)
+                            {
+                                mp.Enable();
+                            }
+                        }
+                    }
                 }
 
                 // Safety monitor: ensure players can NEVER get stuck in the Overworld victory dancing animation
@@ -1684,10 +2189,17 @@ namespace CupheadCoop
 
             try
             {
-                // Issue #5 (v1.3.0): If inside MausoleumLevel, clean up ghosts and trigger Ms. Chalice victory sequence
+                // Issue #5 (v1.3.0 / v1.3.2): If inside MausoleumLevel, stop ghost wave spawning, clean up ghosts,
+                // and ensure MausoleumLevel.OnPreWin() -> legendarychaliceappear_cr() triggers Ms. Chalice dialogue!
                 MausoleumLevel mausoleum = Level.Current as MausoleumLevel;
                 if (mausoleum != null)
                 {
+                    FieldInfo spawnCounterField = typeof(MausoleumLevel).GetField("SPAWNCOUNTER", AllFlags);
+                    if (spawnCounterField != null)
+                    {
+                        spawnCounterField.SetValue(null, 9999);
+                    }
+
                     MausoleumLevelGhostBase[] ghosts = UnityEngine.Object.FindObjectsOfType<MausoleumLevelGhostBase>();
                     if (ghosts != null)
                     {
@@ -1697,6 +2209,17 @@ namespace CupheadCoop
                             {
                                 try { ghosts[i].OnBossDeath(); } catch { }
                             }
+                        }
+                    }
+
+                    FieldInfo isOverField = typeof(MausoleumLevel).GetField("isLevelOver", AllFlags);
+                    bool alreadyOver = isOverField != null && (bool)isOverField.GetValue(mausoleum);
+                    if (!alreadyOver)
+                    {
+                        MethodInfo onPreWin = typeof(MausoleumLevel).GetMethod("OnPreWin", AllFlags);
+                        if (onPreWin != null)
+                        {
+                            onPreWin.Invoke(mausoleum, null);
                         }
                     }
                 }
@@ -1710,7 +2233,7 @@ namespace CupheadCoop
                     MethodInfo zHackWin = typeof(Level).GetMethod("zHack_OnWin", AllFlags);
                     if (zHackWin != null) zHackWin.Invoke(Level.Current, null);
                 }
-                CupheadCoopBootstrapper.Log("Triggered synchronized KNOCKOUT (LevelWin) on Client.");
+                CupheadCoopBootstrapper.Log("[CoopDiag] LevelOutcome: Triggered synchronized KNOCKOUT (LevelWin) on Client for " + Level.Current.CurrentLevel);
             }
             catch (Exception ex)
             {
@@ -1723,12 +2246,21 @@ namespace CupheadCoop
         // =====================================================================
 
         /// <summary>
-        /// In Cuphead, DialogueInteractionPoint.CutScene_cr() (used by Elder Kettle, Saltbaker's Bakery,
-        /// Ms. Chalice in Mausoleum, and King's Leap) disables Player 1's input and yields move_cr(playerTwo, x)
-        /// until Player 2 physically reaches playerTwoDialoguePosition.x. Because the remote player is a network
-        /// puppet with motor.enabled=false, move_cr would wait forever unless the partner manually walked over!
-        /// This method snaps the remote puppet to its dialogue target X and sets Grounded=true so dialogue starts
-        /// immediately, and ensures all interactive entities use Interactor.Either.
+        /// In Cuphead (DialogueInteractionPoint.CutScene_cr and OnDrawGizmosSelected),
+        /// playerOneDialoguePosition and playerTwoDialoguePosition are WORLD coordinates, NOT local offsets!
+        /// Adding dip.transform.position.x shifted the target X off-position and stalled CutScene_cr.
+        /// </summary>
+        public static float ResolveDialogueWorldX(DialogueInteractionPoint dip, Vector2 dlgPos)
+        {
+            if (Mathf.Abs(dlgPos.x) > 0.001f || dip == null)
+                return dlgPos.x;
+            return dip.transform.position.x;
+        }
+
+        /// <summary>
+        /// Snaps both the remote puppet and (after a short grace window) the local player to their exact
+        /// world dialogue X coordinates (playerOneDialoguePosition.x / playerTwoDialoguePosition.x) with Grounded=true
+        /// so DialogueInteractionPoint.move_cr finishes without stalling, and synchronizes dialogue start/end across PCs.
         /// </summary>
         public bool MonitorActiveDialoguesAndInteractions(bool scanAllEntities)
         {
@@ -1744,7 +2276,9 @@ namespace CupheadCoop
                     FieldInfo groundedBf = typeof(LevelPlayerMotor).GetField("<Grounded>k__BackingField", AllFlags);
                     FieldInfo lockedBf = typeof(LevelPlayerMotor).GetField("<Locked>k__BackingField", AllFlags);
 
+                    PlayerId localId = GetLocalPlayerId();
                     PlayerId remoteId = GetRemotePlayerId();
+                    AbstractPlayerController localCtrl = PlayerManager.GetPlayer(localId);
                     AbstractPlayerController remoteCtrl = PlayerManager.GetPlayer(remoteId);
 
                     for (int i = 0; i < points.Length; i++)
@@ -1758,27 +2292,88 @@ namespace CupheadCoop
                             dip.interactor = AbstractLevelInteractiveEntity.Interactor.Either;
                         }
 
+                        int dipId = dip.GetInstanceID();
                         bool isConvActive = convActiveField != null && (bool)convActiveField.GetValue(dip);
-                        if (isConvActive && remoteCtrl != null)
+                        Vector2 p1Vec = p1PosField != null ? (Vector2)p1PosField.GetValue(dip) : Vector2.zero;
+                        Vector2 p2Vec = p2PosField != null ? (Vector2)p2PosField.GetValue(dip) : Vector2.zero;
+                        float p1TargetX = ResolveDialogueWorldX(dip, p1Vec);
+                        float p2TargetX = ResolveDialogueWorldX(dip, p2Vec);
+
+                        if (isConvActive)
                         {
-                            Vector2 dlgOffset = (remoteId == PlayerId.PlayerTwo)
-                                ? (p2PosField != null ? (Vector2)p2PosField.GetValue(dip) : Vector2.zero)
-                                : (p1PosField != null ? (Vector2)p1PosField.GetValue(dip) : Vector2.zero);
-                            float targetX = dip.transform.position.x + dlgOffset.x;
-
-                            Vector3 curPos = remoteCtrl.transform.position;
-                            if (Mathf.Abs(curPos.x - targetX) > 0.01f)
+                            if (_activeDialogueInstanceIds.Add(dipId))
                             {
-                                remoteCtrl.transform.position = new Vector3(targetX, curPos.y, curPos.z);
+                                _dialogueStartTimeByInstanceId[dipId] = Time.unscaledTime;
+                                CupheadCoopBootstrapper.Log(string.Format(
+                                    "[CoopDiag] Dialogue started: {0} (id={1}, P1TargetX={2:F1}, P2TargetX={3:F1})",
+                                    dip.name, (int)dip.dialogueInteraction, p1TargetX, p2TargetX));
+
+                                if (!_applyingRemoteDialogue && _transport.IsConnected)
+                                {
+                                    byte[] dlgStartPkt = CoopProtocol.BuildDialogueSync(
+                                        1,
+                                        (int)dip.dialogueInteraction,
+                                        dip.transform.position.x,
+                                        p1TargetX,
+                                        p2TargetX);
+                                    _transport.Send(dlgStartPkt, true);
+                                }
                             }
 
-                            LevelPlayerController remoteLvl = remoteCtrl as LevelPlayerController;
-                            if (remoteLvl != null && remoteLvl.motor != null)
+                            if (remoteCtrl != null)
                             {
-                                if (groundedBf != null) groundedBf.SetValue(remoteLvl.motor, true);
-                                if (lockedBf != null) lockedBf.SetValue(remoteLvl.motor, false);
+                                float remoteTargetX = (remoteId == PlayerId.PlayerTwo) ? p2TargetX : p1TargetX;
+                                Vector3 curPos = remoteCtrl.transform.position;
+                                if (Mathf.Abs(curPos.x - remoteTargetX) > 0.01f)
+                                {
+                                    remoteCtrl.transform.position = new Vector3(remoteTargetX, curPos.y, curPos.z);
+                                }
+
+                                LevelPlayerController remoteLvl = remoteCtrl as LevelPlayerController;
+                                if (remoteLvl != null && remoteLvl.motor != null)
+                                {
+                                    if (groundedBf != null) groundedBf.SetValue(remoteLvl.motor, true);
+                                    if (lockedBf != null) lockedBf.SetValue(remoteLvl.motor, false);
+                                }
+                                snappedRemote = true;
                             }
-                            snappedRemote = true;
+
+                            // Also ensure the local player reaches their dialogue target X within 0.2s (or immediately in Mausoleum)
+                            // so LevelPlayerMotor.MoveToX_cr never hangs if blocked by stage geometry or camera bounds!
+                            float startedAt;
+                            bool shouldSnapLocal = (dip is MausoleumDialogueInteraction)
+                                || (_dialogueStartTimeByInstanceId.TryGetValue(dipId, out startedAt) && (Time.unscaledTime - startedAt) >= 0.2f);
+                            if (shouldSnapLocal && localCtrl != null)
+                            {
+                                float localTargetX = (localId == PlayerId.PlayerTwo) ? p2TargetX : p1TargetX;
+                                Vector3 localPos = localCtrl.transform.position;
+                                if (Mathf.Abs(localPos.x - localTargetX) > 2.0f)
+                                {
+                                    localCtrl.transform.position = new Vector3(localTargetX, localPos.y, localPos.z);
+                                }
+                                LevelPlayerController localLvl = localCtrl as LevelPlayerController;
+                                if (localLvl != null && localLvl.motor != null && groundedBf != null)
+                                {
+                                    groundedBf.SetValue(localLvl.motor, true);
+                                }
+                            }
+                        }
+                        else if (_activeDialogueInstanceIds.Contains(dipId))
+                        {
+                            _activeDialogueInstanceIds.Remove(dipId);
+                            _dialogueStartTimeByInstanceId.Remove(dipId);
+                            CupheadCoopBootstrapper.Log("[CoopDiag] Dialogue ended: " + dip.name + " (id=" + (int)dip.dialogueInteraction + ")");
+
+                            if (!_applyingRemoteDialogue && _transport.IsConnected)
+                            {
+                                byte[] dlgEndPkt = CoopProtocol.BuildDialogueSync(
+                                    2,
+                                    (int)dip.dialogueInteraction,
+                                    dip.transform.position.x,
+                                    0f,
+                                    0f);
+                                _transport.Send(dlgEndPkt, true);
+                            }
                         }
                     }
                 }
@@ -1844,10 +2439,10 @@ namespace CupheadCoop
                     if (dip == null || !(bool)convActiveField.GetValue(dip))
                         continue;
 
-                    Vector2 dlgOffset = (playerId == PlayerId.PlayerTwo)
+                    Vector2 dlgPos = (playerId == PlayerId.PlayerTwo)
                         ? (p2PosField != null ? (Vector2)p2PosField.GetValue(dip) : Vector2.zero)
                         : (p1PosField != null ? (Vector2)p1PosField.GetValue(dip) : Vector2.zero);
-                    targetX = dip.transform.position.x + dlgOffset.x;
+                    targetX = ResolveDialogueWorldX(dip, dlgPos);
                     return true;
                 }
             }
@@ -1855,9 +2450,139 @@ namespace CupheadCoop
             return false;
         }
 
+        private void HandleDialogueSync(BinaryReader br)
+        {
+            byte action = br.ReadByte();
+            int dialogueId = br.ReadInt32();
+            float pointX = br.ReadSingle();
+            float p1TargetX = br.ReadSingle();
+            float p2TargetX = br.ReadSingle();
+            ApplyRemoteDialogueSync(action, dialogueId, pointX, p1TargetX, p2TargetX);
+        }
+
+        public void ApplyRemoteDialogueSync(byte action, int dialogueId, float pointX, float p1TargetX, float p2TargetX)
+        {
+            _applyingRemoteDialogue = true;
+            try
+            {
+                DialogueInteractionPoint[] points = UnityEngine.Object.FindObjectsOfType<DialogueInteractionPoint>();
+                DialogueInteractionPoint best = null;
+                float bestDist = float.MaxValue;
+
+                if (points != null)
+                {
+                    for (int i = 0; i < points.Length; i++)
+                    {
+                        DialogueInteractionPoint p = points[i];
+                        if (p == null) continue;
+                        if ((int)p.dialogueInteraction == dialogueId)
+                        {
+                            best = p;
+                            break;
+                        }
+                        float d = Mathf.Abs(p.transform.position.x - pointX);
+                        if (d < bestDist)
+                        {
+                            bestDist = d;
+                            best = p;
+                        }
+                    }
+                }
+
+                FieldInfo convActiveField = typeof(DialogueInteractionPoint).GetField("conversationIsActive", AllFlags);
+                FieldInfo groundedBf = typeof(LevelPlayerMotor).GetField("<Grounded>k__BackingField", AllFlags);
+                FieldInfo lockedBf = typeof(LevelPlayerMotor).GetField("<Locked>k__BackingField", AllFlags);
+
+                if (action == 1)
+                {
+                    AbstractPlayerController p1 = PlayerManager.GetPlayer(PlayerId.PlayerOne);
+                    AbstractPlayerController p2 = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
+                    if (p1 != null)
+                    {
+                        p1.transform.position = new Vector3(p1TargetX, p1.transform.position.y, p1.transform.position.z);
+                        LevelPlayerController l1 = p1 as LevelPlayerController;
+                        if (l1 != null && l1.motor != null)
+                        {
+                            if (groundedBf != null) groundedBf.SetValue(l1.motor, true);
+                            if (lockedBf != null) lockedBf.SetValue(l1.motor, false);
+                        }
+                    }
+                    if (p2 != null)
+                    {
+                        p2.transform.position = new Vector3(p2TargetX, p2.transform.position.y, p2.transform.position.z);
+                        LevelPlayerController l2 = p2 as LevelPlayerController;
+                        if (l2 != null && l2.motor != null)
+                        {
+                            if (groundedBf != null) groundedBf.SetValue(l2.motor, true);
+                            if (lockedBf != null) lockedBf.SetValue(l2.motor, false);
+                        }
+                    }
+
+                    if (best != null)
+                    {
+                        int dipId = best.GetInstanceID();
+                        _activeDialogueInstanceIds.Add(dipId);
+                        _dialogueStartTimeByInstanceId[dipId] = Time.unscaledTime;
+                        bool isConvActive = convActiveField != null && (bool)convActiveField.GetValue(best);
+                        if (!isConvActive)
+                        {
+                            MausoleumDialogueInteraction mdi = best as MausoleumDialogueInteraction;
+                            if (mdi != null)
+                            {
+                                mdi.BeginDialogue();
+                            }
+                            else
+                            {
+                                MethodInfo actMethod = typeof(DialogueInteractionPoint).GetMethod("Activate", AllFlags);
+                                if (actMethod != null) actMethod.Invoke(best, null);
+                            }
+                        }
+                    }
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Applied remote DialogueStart (id=" + dialogueId + ", P1X=" + p1TargetX + ", P2X=" + p2TargetX + ")");
+                }
+                else if (action == 2)
+                {
+                    if (best != null)
+                    {
+                        int dipId = best.GetInstanceID();
+                        _activeDialogueInstanceIds.Remove(dipId);
+                        _dialogueStartTimeByInstanceId.Remove(dipId);
+                        bool isConvActive = convActiveField != null && (bool)convActiveField.GetValue(best);
+                        if (isConvActive)
+                        {
+                            try { Dialoguer.EndDialogue(); } catch { }
+                            MethodInfo endHandler = typeof(DialogueInteractionPoint).GetMethod("OnDialogueEndedHandler", AllFlags);
+                            if (endHandler != null)
+                            {
+                                try { endHandler.Invoke(best, null); } catch { }
+                            }
+                        }
+                    }
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Applied remote DialogueEnd (id=" + dialogueId + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                CupheadCoopBootstrapper.Log("ApplyRemoteDialogueSync warning: " + ex.Message);
+            }
+            finally
+            {
+                _applyingRemoteDialogue = false;
+            }
+        }
+
         // =====================================================================
         // 10. MAUSOLEUM GHOST, PARRY & AUTHORITATIVE URN SYNC (Issue #5)
         // =====================================================================
+
+        private static byte GetMausoleumGhostTypeByte(MausoleumLevelGhostBase g)
+        {
+            if (g is MausoleumLevelBigGhost) return 1;
+            if (g is MausoleumLevelCircleGhost) return 2;
+            if (g is MausoleumLevelDelayGhost) return 3;
+            if (g is MausoleumLevelSineGhost) return 4;
+            return 0; // MausoleumLevelRegularGhost
+        }
 
         public void MonitorMausoleumLevel()
         {
@@ -1873,6 +2598,7 @@ namespace CupheadCoop
                     _hookedMausoleumInstanceId = instId;
                     _sentMausoleumLose = false;
                     _parriedMausoleumGhostIds.Clear();
+                    _clientBoundMausoleumGhosts.Clear();
 
                     FieldInfo loseGameField = typeof(MausoleumLevel).GetField("LoseGame", AllFlags);
                     if (loseGameField != null)
@@ -1930,6 +2656,140 @@ namespace CupheadCoop
                         }
                     }
                 }
+
+                // Issue #5 (v1.3.2): Host broadcasts authoritative alive ghost positions & angles every 5 ticks (~12 Hz)
+                // so the Client's ghosts never drift out of sync even if Random.Range diverges mid-wave!
+                if (_transport.Role == CoopRole.Host && _transport.IsConnected && !Level.Current.Ending && !Level.Won && (_localTick % 5 == 0))
+                {
+                    int aliveCount = 0;
+                    if (ghosts != null)
+                    {
+                        for (int i = 0; i < ghosts.Length; i++)
+                        {
+                            if (ghosts[i] != null && !ghosts[i].isDead)
+                                aliveCount++;
+                        }
+                    }
+
+                    int sendCount = Math.Min(aliveCount, 24);
+                    MausoleumGhostEntry[] entries = new MausoleumGhostEntry[sendCount];
+                    int idx = 0;
+                    if (ghosts != null)
+                    {
+                        for (int i = 0; i < ghosts.Length && idx < sendCount; i++)
+                        {
+                            MausoleumLevelGhostBase g = ghosts[i];
+                            if (g == null || g.isDead) continue;
+                            entries[idx++] = new MausoleumGhostEntry
+                            {
+                                GhostId = g.GetInstanceID(),
+                                GhostType = GetMausoleumGhostTypeByte(g),
+                                PosX = g.transform.position.x,
+                                PosY = g.transform.position.y,
+                                AngleZ = g.transform.eulerAngles.z,
+                                Speed = 0f
+                            };
+                        }
+                    }
+
+                    byte[] ghostSyncPkt = CoopProtocol.BuildMausoleumGhostSync(entries, idx);
+                    _transport.Send(ghostSyncPkt, false);
+                }
+            }
+            catch { }
+        }
+
+        private void HandleMausoleumGhostSync(BinaryReader br)
+        {
+            ushort count = br.ReadUInt16();
+            MausoleumGhostEntry[] entries = new MausoleumGhostEntry[count];
+            for (int i = 0; i < count; i++)
+            {
+                entries[i].GhostId = br.ReadInt32();
+                entries[i].GhostType = br.ReadByte();
+                entries[i].PosX = br.ReadSingle();
+                entries[i].PosY = br.ReadSingle();
+                entries[i].AngleZ = br.ReadSingle();
+                entries[i].Speed = br.ReadSingle();
+            }
+            ApplyRemoteMausoleumGhostSync(entries);
+        }
+
+        public void ApplyRemoteMausoleumGhostSync(MausoleumGhostEntry[] entries)
+        {
+            if (_transport.Role != CoopRole.Client || !(Level.Current is MausoleumLevel) || Level.Current.Ending || Level.Won)
+                return;
+
+            try
+            {
+                MausoleumLevelGhostBase[] localGhosts = UnityEngine.Object.FindObjectsOfType<MausoleumLevelGhostBase>();
+                if (localGhosts == null)
+                    return;
+
+                HashSet<int> usedLocalIds = new HashSet<int>();
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    MausoleumGhostEntry e = entries[i];
+                    MausoleumLevelGhostBase matched = null;
+
+                    if (_clientBoundMausoleumGhosts.TryGetValue(e.GhostId, out matched))
+                    {
+                        if (matched == null || matched.isDead)
+                        {
+                            matched = null;
+                            _clientBoundMausoleumGhosts.Remove(e.GhostId);
+                        }
+                    }
+
+                    if (matched == null)
+                    {
+                        float bestDist = float.MaxValue;
+                        for (int j = 0; j < localGhosts.Length; j++)
+                        {
+                            MausoleumLevelGhostBase lg = localGhosts[j];
+                            if (lg == null || lg.isDead || usedLocalIds.Contains(lg.GetInstanceID()))
+                                continue;
+                            if (GetMausoleumGhostTypeByte(lg) != e.GhostType)
+                                continue;
+
+                            float d = Vector2.Distance(new Vector2(lg.transform.position.x, lg.transform.position.y), new Vector2(e.PosX, e.PosY));
+                            if (d < bestDist)
+                            {
+                                bestDist = d;
+                                matched = lg;
+                            }
+                        }
+
+                        if (matched != null)
+                        {
+                            _clientBoundMausoleumGhosts[e.GhostId] = matched;
+                        }
+                    }
+
+                    if (matched != null)
+                    {
+                        usedLocalIds.Add(matched.GetInstanceID());
+                        Vector3 targetPos = new Vector3(e.PosX, e.PosY, matched.transform.position.z);
+                        if (Vector3.Distance(matched.transform.position, targetPos) > 120f)
+                            matched.transform.position = targetPos;
+                        else
+                            matched.transform.position = Vector3.Lerp(matched.transform.position, targetPos, 0.7f);
+
+                        matched.transform.eulerAngles = new Vector3(0f, 0f, e.AngleZ);
+                    }
+                }
+
+                // If Host has 0 alive ghosts while Client still has leftover ghosts at wave end, clean them up
+                if (entries.Length == 0 && localGhosts.Length > 0)
+                {
+                    for (int j = 0; j < localGhosts.Length; j++)
+                    {
+                        if (localGhosts[j] != null && !localGhosts[j].isDead)
+                        {
+                            try { localGhosts[j].OnBossDeath(); } catch { }
+                        }
+                    }
+                }
             }
             catch { }
         }
@@ -1944,6 +2804,7 @@ namespace CupheadCoop
             if (_sentMausoleumLose || !_transport.IsConnected || _transport.Role != CoopRole.Host)
                 return;
             _sentMausoleumLose = true;
+            CupheadCoopBootstrapper.Log("[CoopDiag] LevelOutcome: Host urn failed in Mausoleum; broadcasting LevelLose.");
             byte[] losePkt = CoopProtocol.BuildLevelEvent(LevelEventType.LevelLose, (byte)PlayerId.PlayerOne, 0f, 0f, (int)Levels.Mausoleum);
             _transport.Send(losePkt, true);
         }
@@ -1986,7 +2847,7 @@ namespace CupheadCoop
                     MethodInfo onParry = best.GetType().GetMethod("OnParry", AllFlags);
                     if (onParry != null)
                     {
-                        onParry.Invoke(best, null);
+                        onParry.Invoke(best, new object[] { PlayerManager.GetPlayer(GetRemotePlayerId()) });
                     }
                 }
             }
@@ -2006,6 +2867,7 @@ namespace CupheadCoop
                 {
                     failMethod.Invoke(mausoleum, null);
                 }
+                CupheadCoopBootstrapper.Log("[CoopDiag] LevelOutcome: Client applied authoritative MausoleumLose.");
             }
             catch { }
         }
@@ -2013,6 +2875,25 @@ namespace CupheadCoop
         // =====================================================================
         // 11. MAP LEVEL BADGE & DIFFICULTY SELECTION SYNC (Issue #7)
         // =====================================================================
+
+        private static bool IsMapStartUiActiveOrLoading(AbstractMapSceneStartUI ui)
+        {
+            if (ui == null)
+                return false;
+            return ui.CurrentState == AbstractMapSceneStartUI.State.Active
+                || ui.CurrentState == AbstractMapSceneStartUI.State.Loading;
+        }
+
+        private static bool AreAllMapStartUisInactive()
+        {
+            if (MapDifficultySelectStartUI.Current != null && MapDifficultySelectStartUI.Current.CurrentState != AbstractMapSceneStartUI.State.Inactive)
+                return false;
+            if (MapConfirmStartUI.Current != null && MapConfirmStartUI.Current.CurrentState != AbstractMapSceneStartUI.State.Inactive)
+                return false;
+            if (MapBasicStartUI.Current != null && MapBasicStartUI.Current.CurrentState != AbstractMapSceneStartUI.State.Inactive)
+                return false;
+            return true;
+        }
 
         private void MonitorMapLevelSelectSync()
         {
@@ -2030,20 +2911,22 @@ namespace CupheadCoop
 
             try
             {
+                // Issue #7 (v1.3.2): Only consider a UI open for local monitoring when CurrentState is Active or Loading!
+                // Never treat State.Animating (which persists during Out() fade_cr) as open, preventing the infinite In()/Out() flash loop!
                 byte activeKind = 0;
                 AbstractMapSceneStartUI activeUi = null;
 
-                if (MapDifficultySelectStartUI.Current != null && MapDifficultySelectStartUI.Current.CurrentState != AbstractMapSceneStartUI.State.Inactive)
+                if (IsMapStartUiActiveOrLoading(MapDifficultySelectStartUI.Current))
                 {
                     activeKind = 1;
                     activeUi = MapDifficultySelectStartUI.Current;
                 }
-                else if (MapConfirmStartUI.Current != null && MapConfirmStartUI.Current.CurrentState != AbstractMapSceneStartUI.State.Inactive)
+                else if (IsMapStartUiActiveOrLoading(MapConfirmStartUI.Current))
                 {
                     activeKind = 2;
                     activeUi = MapConfirmStartUI.Current;
                 }
-                else if (MapBasicStartUI.Current != null && MapBasicStartUI.Current.CurrentState != AbstractMapSceneStartUI.State.Inactive)
+                else if (IsMapStartUiActiveOrLoading(MapBasicStartUI.Current))
                 {
                     activeKind = 3;
                     activeUi = MapBasicStartUI.Current;
@@ -2051,7 +2934,7 @@ namespace CupheadCoop
 
                 if (_isRemoteMapStartUiOpen)
                 {
-                    if (activeKind == 0)
+                    if (AreAllMapStartUisInactive())
                     {
                         _isRemoteMapStartUiOpen = false;
                         _remoteMapStartUiKind = 0;
@@ -2062,6 +2945,9 @@ namespace CupheadCoop
                     }
                     return;
                 }
+
+                if (Time.unscaledTime < _ignoreLocalMapStartUiOpenUntilTime)
+                    return;
 
                 if (activeKind != 0 && activeUi != null)
                 {
@@ -2085,9 +2971,10 @@ namespace CupheadCoop
                         _transport.Send(pkt, true);
                     }
                 }
-                else if (_wasLocalMapStartUiOpen)
+                else if (_wasLocalMapStartUiOpen && AreAllMapStartUisInactive())
                 {
                     _wasLocalMapStartUiOpen = false;
+                    _ignoreLocalMapStartUiOpenUntilTime = Time.unscaledTime + 0.35f;
                     byte[] pkt = CoopProtocol.BuildMapLevelSelectSync(_lastSentMapStartUiKind, false, _lastSentMapStartLevel, _lastSentMapStartDiff, _lastSentMapStartCursor);
                     _transport.Send(pkt, true);
                     _lastSentMapStartUiKind = 0;
@@ -2140,6 +3027,7 @@ namespace CupheadCoop
                 if (isOpen)
                 {
                     _isRemoteMapStartUiOpen = true;
+                    _wasLocalMapStartUiOpen = false;
                     _remoteMapStartUiKind = uiKind;
                     targetUi.level = levelName ?? string.Empty;
 
@@ -2220,10 +3108,23 @@ namespace CupheadCoop
                 else
                 {
                     _isRemoteMapStartUiOpen = false;
+                    _wasLocalMapStartUiOpen = false;
                     _remoteMapStartUiKind = 0;
+                    _lastSentMapStartUiKind = 0;
+                    _ignoreLocalMapStartUiOpenUntilTime = Time.unscaledTime + 0.5f;
+
                     if (targetUi.CurrentState != AbstractMapSceneStartUI.State.Inactive)
                     {
                         targetUi.Out();
+                    }
+                    FieldInfo hasPopupField = typeof(AbstractMapInteractiveEntity).GetField("HasPopupOpened", AllFlags);
+                    if (hasPopupField != null)
+                    {
+                        hasPopupField.SetValue(null, false);
+                    }
+                    if (ReInput.isReady)
+                    {
+                        RouteMapStartUiInputToLocalPlayer(targetUi, ReInput.players.GetPlayer(0));
                     }
                 }
             }
@@ -2435,8 +3336,14 @@ namespace CupheadCoop
                     {
                         if (remotePlane.motor != null && remotePlane.motor.enabled)
                             remotePlane.motor.enabled = false;
-                        if (remotePlane.weaponManager != null && remotePlane.weaponManager.enabled)
-                            remotePlane.weaponManager.enabled = false;
+                        if (remotePlane.weaponManager != null)
+                        {
+                            // Issue #9 (v1.3.2): Ensure PlanePlayerWeaponManager.Start() (which runs weapons.Init()
+                            // and starts AbstractPlaneWeapon.fireWeapon_cr()) has initialized before disabling FixedUpdate!
+                            EnsurePlaneWeaponsInitialized(remotePlane.weaponManager);
+                            if (remotePlane.weaponManager.enabled)
+                                remotePlane.weaponManager.enabled = false;
+                        }
                     }
                 }
 
@@ -2481,6 +3388,8 @@ namespace CupheadCoop
                 }
 
                 // 3. Equip Menu (MapEquipUI on World Map AND LevelEquipUI on Game Over screen!)
+                // Issue #8 (v1.3.2): Do NOT force ReadyAndWaiting=true on remoteCard; let MonitorEquipMenuSync
+                // synchronize both cards' selections, rotations, and ReadyAndWaiting states!
                 if (AbstractEquipUI.Current != null)
                 {
                     FieldInfo p1CardField = typeof(AbstractEquipUI).GetField("playerOne", AllFlags);
@@ -2495,7 +3404,6 @@ namespace CupheadCoop
 
                         FieldInfo cardInputField = typeof(MapEquipUICard).GetField("playerInput", AllFlags);
                         FieldInfo inputEnabledField = typeof(MapEquipUICard).GetField("inputEnabled", AllFlags);
-                        FieldInfo readyBackingField = typeof(MapEquipUICard).GetField("<ReadyAndWaiting>k__BackingField", AllFlags);
 
                         if (localCard != null)
                         {
@@ -2507,12 +3415,13 @@ namespace CupheadCoop
                         {
                             if (cardInputField != null) cardInputField.SetValue(remoteCard, unassignedRewiredPlayer);
                             if (inputEnabledField != null) inputEnabledField.SetValue(remoteCard, false);
-                            if (readyBackingField != null) readyBackingField.SetValue(remoteCard, true);
                         }
                     }
                 }
 
                 // 4. Porkrind's Emporium (ShopScene)
+                // Issue #11 (v1.3.2): Do NOT force remoteShop to Exited when localShop exits!
+                // Vanilla ShopScene.OnExit() waits until BOTH players have exited; MonitorShopSceneSync syncs each player's state.
                 if (ShopScene.Current != null)
                 {
                     FieldInfo s1Field = typeof(ShopScene).GetField("playerOne", AllFlags);
@@ -2526,28 +3435,15 @@ namespace CupheadCoop
                         ShopScenePlayer remoteShop = (_transport.Role == CoopRole.Client) ? shopP1 : shopP2;
 
                         FieldInfo shopInputField = typeof(ShopScenePlayer).GetField("input", AllFlags);
-                        FieldInfo shopStateField = typeof(ShopScenePlayer).GetField("state", AllFlags);
 
                         if (localShop != null && shopInputField != null)
                         {
                             shopInputField.SetValue(localShop, localRewiredPlayer);
                         }
 
-                        if (remoteShop != null && shopInputField != null && shopStateField != null)
+                        if (remoteShop != null && shopInputField != null)
                         {
                             shopInputField.SetValue(remoteShop, unassignedRewiredPlayer);
-                            if (localShop != null)
-                            {
-                                int localState = Convert.ToInt32(shopStateField.GetValue(localShop));
-                                int remoteState = Convert.ToInt32(shopStateField.GetValue(remoteShop));
-                                if ((localState == 4 || localState == 5) && remoteState != 5)
-                                {
-                                    shopStateField.SetValue(remoteShop, Enum.ToObject(shopStateField.FieldType, 5)); // Exited = 5
-                                    MethodInfo onExitMethod = typeof(ShopScene).GetMethod("OnExit", AllFlags);
-                                    if (onExitMethod != null)
-                                        onExitMethod.Invoke(ShopScene.Current, null);
-                                }
-                            }
                         }
                     }
                 }
@@ -2555,6 +3451,560 @@ namespace CupheadCoop
             catch (Exception ex)
             {
                 CupheadCoopBootstrapper.Log("ConfigureLocalAndRemoteInputs warning: " + ex.Message);
+            }
+        }
+
+        public static void EnsurePlaneWeaponsInitialized(PlanePlayerWeaponManager wm)
+        {
+            if (wm == null)
+                return;
+
+            try
+            {
+                PropertyInfo statesProp = typeof(PlanePlayerWeaponManager).GetProperty("states", AllFlags);
+                if (statesProp != null && statesProp.GetValue(wm, null) == null)
+                {
+                    MethodInfo startMethod = typeof(PlanePlayerWeaponManager).GetMethod("Start", AllFlags);
+                    if (startMethod != null)
+                    {
+                        startMethod.Invoke(wm, null);
+                    }
+                }
+
+                FieldInfo cwField = typeof(PlanePlayerWeaponManager).GetField("currentWeapon", AllFlags);
+                if (cwField != null)
+                {
+                    Weapon curWep = (Weapon)cwField.GetValue(wm);
+                    if (curWep == Weapon.None || (int)curWep == 0)
+                    {
+                        PlanePlayerController p = wm.GetComponent<PlanePlayerController>();
+                        bool isChalice = (p != null && p.stats != null && p.stats.isChalice);
+                        Weapon defaultPlaneWep = isChalice ? Weapon.plane_chalice_weapon_3way : Weapon.plane_weapon_peashot;
+                        cwField.SetValue(wm, defaultPlaneWep);
+                    }
+                }
+
+                PropertyInfo stateProp = typeof(PlanePlayerWeaponManager).GetProperty("state", AllFlags);
+                if (stateProp != null)
+                {
+                    int curState = Convert.ToInt32(stateProp.GetValue(wm, null));
+                    if (curState == 0) // Inactive = 0 -> Ready = 1
+                    {
+                        stateProp.SetValue(wm, Enum.ToObject(stateProp.PropertyType, 1), null);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // =====================================================================
+        // 12. MAP EQUIP MENU & SHOP CO-WAIT SYNC (Issues #8 & #11)
+        // =====================================================================
+
+        private void MonitorEquipMenuSync()
+        {
+            if (AbstractEquipUI.Current == null)
+            {
+                _wasLocalEquipMenuOpen = false;
+                _isRemoteEquipMenuOpen = false;
+                _lastSentEquipSide = 255;
+                return;
+            }
+
+            if (_applyingRemoteEquipMenu)
+                return;
+
+            try
+            {
+                if (AbstractEquipUI.Current.state == AbstractPauseGUI.State.Animating)
+                    return;
+
+                bool isOpen = (AbstractEquipUI.Current.CurrentState == AbstractEquipUI.ActiveState.Active
+                    || AbstractEquipUI.Current.state == AbstractPauseGUI.State.Paused);
+
+                FieldInfo p1CardField = typeof(AbstractEquipUI).GetField("playerOne", AllFlags);
+                FieldInfo p2CardField = typeof(AbstractEquipUI).GetField("playerTwo", AllFlags);
+                if (p1CardField == null || p2CardField == null)
+                    return;
+
+                MapEquipUICard cardP1 = p1CardField.GetValue(AbstractEquipUI.Current) as MapEquipUICard;
+                MapEquipUICard cardP2 = p2CardField.GetValue(AbstractEquipUI.Current) as MapEquipUICard;
+                MapEquipUICard localCard = (_transport.Role == CoopRole.Client) ? cardP2 : cardP1;
+
+                if (isOpen && localCard != null)
+                {
+                    if (Time.unscaledTime < _ignoreLocalEquipMenuUntilTime && !_wasLocalEquipMenuOpen && !_isRemoteEquipMenuOpen)
+                        return;
+
+                    FieldInfo sideField = typeof(MapEquipUICard).GetField("side", AllFlags);
+                    FieldInfo backField = typeof(MapEquipUICard).GetField("back", AllFlags);
+                    FieldInfo frontCardField = typeof(MapEquipUICard).GetField("front", AllFlags);
+                    FieldInfo backSelectCardField = typeof(MapEquipUICard).GetField("backSelect", AllFlags);
+                    FieldInfo frontIdxField = typeof(MapEquipUICardFront).GetField("index", AllFlags);
+                    FieldInfo backIdxField = typeof(MapEquipUICardBackSelect).GetField("index", AllFlags);
+
+                    MapEquipUICardFront localFront = frontCardField != null ? frontCardField.GetValue(localCard) as MapEquipUICardFront : null;
+                    MapEquipUICardBackSelect localBackSelect = backSelectCardField != null ? backSelectCardField.GetValue(localCard) as MapEquipUICardBackSelect : null;
+
+                    byte side = sideField != null ? (byte)Convert.ToInt32(sideField.GetValue(localCard)) : (byte)0;
+                    byte backMode = backField != null ? (byte)Convert.ToInt32(backField.GetValue(localCard)) : (byte)0;
+                    byte slot = (localFront != null) ? (byte)Convert.ToInt32(localFront.Slot) : (byte)0;
+                    int frontIdx = (localFront != null && frontIdxField != null) ? (int)frontIdxField.GetValue(localFront) : 0;
+                    int backIdx = (localBackSelect != null && backIdxField != null) ? (int)backIdxField.GetValue(localBackSelect) : 0;
+                    bool ready = localCard.ReadyAndWaiting;
+
+                    PlayerId localId = GetLocalPlayerId();
+                    int pWep = 0, sWep = 0, sup = 0, chm = 0;
+                    if (PlayerData.Initialized && PlayerData.Data != null)
+                    {
+                        PlayerData.PlayerLoadouts.PlayerLoadout ld = PlayerData.Data.Loadouts.GetPlayerLoadout(localId);
+                        if (ld != null)
+                        {
+                            pWep = (int)ld.primaryWeapon;
+                            sWep = (int)ld.secondaryWeapon;
+                            sup = (int)ld.super;
+                            chm = (int)ld.charm;
+                            SanitizeLoadoutForDlc(ref pWep, ref sWep, ref sup, ref chm);
+                        }
+                    }
+
+                    if (!_wasLocalEquipMenuOpen
+                        || side != _lastSentEquipSide
+                        || backMode != _lastSentEquipBack
+                        || slot != _lastSentEquipSlot
+                        || frontIdx != _lastSentEquipFrontIdx
+                        || backIdx != _lastSentEquipBackIdx
+                        || ready != _lastSentEquipReady
+                        || pWep != _lastSentPrimaryWep
+                        || sWep != _lastSentSecondaryWep
+                        || sup != _lastSentSuper
+                        || chm != _lastSentCharm)
+                    {
+                        if (!_wasLocalEquipMenuOpen)
+                        {
+                            CupheadCoopBootstrapper.Log("[CoopDiag] EquipUI opened locally; syncing to partner.");
+                        }
+
+                        _wasLocalEquipMenuOpen = true;
+                        _lastSentEquipSide = side;
+                        _lastSentEquipBack = backMode;
+                        _lastSentEquipSlot = slot;
+                        _lastSentEquipFrontIdx = frontIdx;
+                        _lastSentEquipBackIdx = backIdx;
+                        _lastSentEquipReady = ready;
+
+                        byte[] pkt = CoopProtocol.BuildEquipMenuSync(
+                            true,
+                            (byte)localId,
+                            side,
+                            backMode,
+                            slot,
+                            frontIdx,
+                            backIdx,
+                            ready,
+                            pWep,
+                            sWep,
+                            sup,
+                            chm);
+                        _transport.Send(pkt, true);
+                    }
+                }
+                else if (!isOpen && (_wasLocalEquipMenuOpen || _isRemoteEquipMenuOpen))
+                {
+                    _wasLocalEquipMenuOpen = false;
+                    _isRemoteEquipMenuOpen = false;
+                    _lastSentEquipSide = 255;
+                    _ignoreLocalEquipMenuUntilTime = Time.unscaledTime + 0.4f;
+
+                    CupheadCoopBootstrapper.Log("[CoopDiag] EquipUI closed locally; syncing close and loadout to partner.");
+                    byte[] pkt = CoopProtocol.BuildEquipMenuSync(
+                        false,
+                        (byte)GetLocalPlayerId(),
+                        0, 0, 0, 0, 0, false, 0, 0, 0, 0);
+                    _transport.Send(pkt, true);
+                    SendLocalLoadout(true);
+
+                    if (Map.Current != null)
+                    {
+                        if (_transport.Role == CoopRole.Host)
+                        {
+                            SendWorldSaveMirror();
+                        }
+                        if (BothPlayersHaveDlc)
+                        {
+                            RefreshDlcBoatmanOnMapIfUnlocked();
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void HandleEquipMenuSync(BinaryReader br)
+        {
+            bool isOpen = br.ReadBoolean();
+            byte playerId = br.ReadByte();
+            byte side = br.ReadByte();
+            byte backMode = br.ReadByte();
+            byte slot = br.ReadByte();
+            int frontIdx = br.ReadInt32();
+            int backIdx = br.ReadInt32();
+            bool ready = br.ReadBoolean();
+            int pWep = br.ReadInt32();
+            int sWep = br.ReadInt32();
+            int sup = br.ReadInt32();
+            int chm = br.ReadInt32();
+
+            ApplyRemoteEquipMenuSync(isOpen, playerId, side, backMode, slot, frontIdx, backIdx, ready, pWep, sWep, sup, chm);
+        }
+
+        public void ApplyRemoteEquipMenuSync(
+            bool isOpen,
+            byte playerId,
+            byte side,
+            byte backMode,
+            byte slot,
+            int frontIndex,
+            int backIndex,
+            bool readyAndWaiting,
+            int primaryWep,
+            int secondaryWep,
+            int superId,
+            int charmId)
+        {
+            if (AbstractEquipUI.Current == null)
+                return;
+
+            _applyingRemoteEquipMenu = true;
+            try
+            {
+                FieldInfo p1CardField = typeof(AbstractEquipUI).GetField("playerOne", AllFlags);
+                FieldInfo p2CardField = typeof(AbstractEquipUI).GetField("playerTwo", AllFlags);
+                FieldInfo stateBf = typeof(AbstractPauseGUI).GetField("<state>k__BackingField", AllFlags);
+                PropertyInfo curStateProp = typeof(AbstractEquipUI).GetProperty("CurrentState", AllFlags);
+                MethodInfo showImm = typeof(AbstractPauseGUI).GetMethod("ShowImmediate", AllFlags);
+                MethodInfo hideImm = typeof(AbstractPauseGUI).GetMethod("HideImmediate", AllFlags);
+
+                MapEquipUICard cardP1 = p1CardField != null ? p1CardField.GetValue(AbstractEquipUI.Current) as MapEquipUICard : null;
+                MapEquipUICard cardP2 = p2CardField != null ? p2CardField.GetValue(AbstractEquipUI.Current) as MapEquipUICard : null;
+                MapEquipUICard localCard = (_transport.Role == CoopRole.Client) ? cardP2 : cardP1;
+                MapEquipUICard remoteCard = (_transport.Role == CoopRole.Client) ? cardP1 : cardP2;
+
+                if (isOpen)
+                {
+                    _isRemoteEquipMenuOpen = true;
+                    _wasLocalEquipMenuOpen = true;
+
+                    SanitizeLoadoutForDlc(ref primaryWep, ref secondaryWep, ref superId, ref charmId);
+                    ApplyRemoteLoadout(GetRemotePlayerId(), primaryWep, secondaryWep, superId, charmId);
+
+                    if (AbstractEquipUI.Current.CurrentState != AbstractEquipUI.ActiveState.Active
+                        && AbstractEquipUI.Current.state != AbstractPauseGUI.State.Paused)
+                    {
+                        PauseManager.state = PauseManager.State.Unpaused;
+                        MethodInfo pauseMethod = typeof(AbstractPauseGUI).GetMethod("Pause", AllFlags);
+                        if (pauseMethod != null) pauseMethod.Invoke(AbstractEquipUI.Current, null);
+
+                        if (AbstractEquipUI.Current.state == AbstractPauseGUI.State.Unpaused)
+                        {
+                            if (stateBf != null) stateBf.SetValue(AbstractEquipUI.Current, AbstractPauseGUI.State.Paused);
+                            if (curStateProp != null) curStateProp.SetValue(AbstractEquipUI.Current, AbstractEquipUI.ActiveState.Active, null);
+                            MethodInfo onPause = typeof(AbstractEquipUI).GetMethod("OnPause", AllFlags);
+                            if (onPause != null) onPause.Invoke(AbstractEquipUI.Current, null);
+                            if (showImm != null) showImm.Invoke(AbstractEquipUI.Current, null);
+                        }
+                        if (PauseManager.state != PauseManager.State.Paused)
+                        {
+                            PauseManager.Pause();
+                        }
+                        CupheadCoopBootstrapper.Log("[CoopDiag] Opened EquipUI via remote EquipMenuSync.");
+                    }
+
+                    FieldInfo frontCardField = typeof(MapEquipUICard).GetField("front", AllFlags);
+                    FieldInfo backSelectCardField = typeof(MapEquipUICard).GetField("backSelect", AllFlags);
+                    FieldInfo checkListCardField = typeof(MapEquipUICard).GetField("checkList", AllFlags);
+
+                    MapEquipUICardFront p1Front = (cardP1 != null && frontCardField != null) ? frontCardField.GetValue(cardP1) as MapEquipUICardFront : null;
+                    MapEquipUICardFront p2Front = (cardP2 != null && frontCardField != null) ? frontCardField.GetValue(cardP2) as MapEquipUICardFront : null;
+                    if (p1Front != null) p1Front.Refresh();
+                    if (p2Front != null) p2Front.Refresh();
+
+                    if (remoteCard != null)
+                    {
+                        remoteCard.CanRotate = true;
+                        FieldInfo sideField = typeof(MapEquipUICard).GetField("side", AllFlags);
+                        FieldInfo backField = typeof(MapEquipUICard).GetField("back", AllFlags);
+                        FieldInfo readyBf = typeof(MapEquipUICard).GetField("<ReadyAndWaiting>k__BackingField", AllFlags);
+
+                        MapEquipUICardFront remFront = frontCardField != null ? frontCardField.GetValue(remoteCard) as MapEquipUICardFront : null;
+                        MapEquipUICardBackSelect remBackSelect = backSelectCardField != null ? backSelectCardField.GetValue(remoteCard) as MapEquipUICardBackSelect : null;
+                        MapEquipUIChecklist remCheckList = checkListCardField != null ? checkListCardField.GetValue(remoteCard) as MapEquipUIChecklist : null;
+
+                        if (remFront != null)
+                        {
+                            MethodInfo setFrontCursor = typeof(MapEquipUICardFront).GetMethod("SetCursorPosition", AllFlags);
+                            if (setFrontCursor != null)
+                            {
+                                setFrontCursor.Invoke(remFront, new object[] { frontIndex });
+                            }
+                            remFront.Refresh();
+                        }
+
+                        byte curSide = sideField != null ? (byte)Convert.ToInt32(sideField.GetValue(remoteCard)) : (byte)0;
+                        byte curBack = backField != null ? (byte)Convert.ToInt32(backField.GetValue(remoteCard)) : (byte)0;
+
+                        if (side == 0)
+                        {
+                            if (curSide != 0 || remoteCard.ReadyAndWaiting)
+                            {
+                                MethodInfo rotFront = typeof(MapEquipUICard).GetMethod("RotateToFront", AllFlags);
+                                if (rotFront != null) rotFront.Invoke(remoteCard, null);
+                            }
+                        }
+                        else
+                        {
+                            if (backMode == 0) // Select
+                            {
+                                MethodInfo rotBackSelect = typeof(MapEquipUICard).GetMethod("RotateToBackSelect", AllFlags);
+                                if (rotBackSelect != null)
+                                {
+                                    object slotEnum = Enum.ToObject(typeof(MapEquipUICard.Slot), slot);
+                                    rotBackSelect.Invoke(remoteCard, new object[] { slotEnum });
+                                }
+                                if (remBackSelect != null)
+                                {
+                                    FieldInfo backIdxField = typeof(MapEquipUICardBackSelect).GetField("index", AllFlags);
+                                    MethodInfo setBackCursor = typeof(MapEquipUICardBackSelect).GetMethod("SetCursorPosition", AllFlags);
+                                    MethodInfo updateText = typeof(MapEquipUICardBackSelect).GetMethod("UpdateText", AllFlags);
+                                    if (backIdxField != null) backIdxField.SetValue(remBackSelect, backIndex);
+                                    if (setBackCursor != null) setBackCursor.Invoke(remBackSelect, new object[] { backIndex });
+                                    if (updateText != null) updateText.Invoke(remBackSelect, null);
+                                }
+                            }
+                            else if (backMode == 1) // Ready
+                            {
+                                if (curSide != 1 || curBack != 1)
+                                {
+                                    MethodInfo rotReady = typeof(MapEquipUICard).GetMethod("RotateToBackReady", AllFlags);
+                                    if (rotReady != null) rotReady.Invoke(remoteCard, null);
+                                }
+                            }
+                            else if (backMode == 2) // Checklist
+                            {
+                                if (curSide != 1 || curBack != 2)
+                                {
+                                    MethodInfo rotCheck = typeof(MapEquipUICard).GetMethod("RotateToCheckList", AllFlags);
+                                    if (rotCheck != null) rotCheck.Invoke(remoteCard, null);
+                                }
+                                if (remCheckList != null)
+                                {
+                                    remCheckList.SetCursorPosition(backIndex, false);
+                                }
+                            }
+                        }
+
+                        if (readyBf != null)
+                        {
+                            readyBf.SetValue(remoteCard, readyAndWaiting);
+                        }
+
+                        if (readyAndWaiting && localCard != null && localCard.ReadyAndWaiting)
+                        {
+                            MethodInfo closeMethod = typeof(AbstractEquipUI).GetMethod("Close", AllFlags);
+                            if (closeMethod != null) closeMethod.Invoke(AbstractEquipUI.Current, null);
+                        }
+                    }
+                }
+                else
+                {
+                    _isRemoteEquipMenuOpen = false;
+                    _wasLocalEquipMenuOpen = false;
+                    _lastSentEquipSide = 255;
+                    _ignoreLocalEquipMenuUntilTime = Time.unscaledTime + 0.45f;
+
+                    FieldInfo readyBf = typeof(MapEquipUICard).GetField("<ReadyAndWaiting>k__BackingField", AllFlags);
+                    if (readyBf != null)
+                    {
+                        if (cardP1 != null) readyBf.SetValue(cardP1, true);
+                        if (cardP2 != null) readyBf.SetValue(cardP2, true);
+                    }
+
+                    MethodInfo closeMethod = typeof(AbstractEquipUI).GetMethod("Close", AllFlags);
+                    if (closeMethod != null) closeMethod.Invoke(AbstractEquipUI.Current, null);
+
+                    if (AbstractEquipUI.Current.state != AbstractPauseGUI.State.Unpaused)
+                    {
+                        if (stateBf != null) stateBf.SetValue(AbstractEquipUI.Current, AbstractPauseGUI.State.Unpaused);
+                        if (curStateProp != null) curStateProp.SetValue(AbstractEquipUI.Current, AbstractEquipUI.ActiveState.Inactive, null);
+                        if (hideImm != null) hideImm.Invoke(AbstractEquipUI.Current, null);
+                    }
+                    if (PauseManager.state == PauseManager.State.Paused && !_waitingAtLevelReadyGate && !_isPausedByPauseSync)
+                    {
+                        PauseManager.Unpause();
+                    }
+
+                    if (Map.Current != null && BothPlayersHaveDlc)
+                    {
+                        RefreshDlcBoatmanOnMapIfUnlocked();
+                    }
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Closed EquipUI via remote EquipMenuSync.");
+                }
+            }
+            catch (Exception ex)
+            {
+                CupheadCoopBootstrapper.Log("ApplyRemoteEquipMenuSync warning: " + ex.Message);
+            }
+            finally
+            {
+                _applyingRemoteEquipMenu = false;
+            }
+        }
+
+        private void MonitorShopSceneSync()
+        {
+            if (ShopScene.Current == null)
+            {
+                _lastSentShopState = 255;
+                _lastSentShopItemIdx = -1;
+                _lastSentShopExiting = false;
+                return;
+            }
+
+            if (_applyingRemoteShopState)
+                return;
+
+            try
+            {
+                FieldInfo s1Field = typeof(ShopScene).GetField("playerOne", AllFlags);
+                FieldInfo s2Field = typeof(ShopScene).GetField("playerTwo", AllFlags);
+                if (s1Field == null || s2Field == null)
+                    return;
+
+                ShopScenePlayer shopP1 = s1Field.GetValue(ShopScene.Current) as ShopScenePlayer;
+                ShopScenePlayer shopP2 = s2Field.GetValue(ShopScene.Current) as ShopScenePlayer;
+                ShopScenePlayer localShop = (_transport.Role == CoopRole.Client) ? shopP2 : shopP1;
+                if (localShop == null)
+                    return;
+
+                FieldInfo stateField = typeof(ShopScenePlayer).GetField("state", AllFlags);
+                FieldInfo idxField = typeof(ShopScenePlayer).GetField("index", AllFlags);
+                FieldInfo exitingField = typeof(ShopScenePlayer).GetField("exitingShop", AllFlags);
+                if (stateField == null)
+                    return;
+
+                byte curState = (byte)Convert.ToInt32(stateField.GetValue(localShop));
+                int curIdx = idxField != null ? (int)idxField.GetValue(localShop) : 0;
+                bool curExiting = exitingField != null && (bool)exitingField.GetValue(localShop);
+
+                if (curState != _lastSentShopState || curIdx != _lastSentShopItemIdx || curExiting != _lastSentShopExiting)
+                {
+                    _lastSentShopState = curState;
+                    _lastSentShopItemIdx = curIdx;
+                    _lastSentShopExiting = curExiting;
+
+                    byte[] pkt = CoopProtocol.BuildShopStateSync((byte)GetLocalPlayerId(), curState, curIdx, curExiting);
+                    _transport.Send(pkt, true);
+                }
+            }
+            catch { }
+        }
+
+        private void HandleShopStateSync(BinaryReader br)
+        {
+            byte playerId = br.ReadByte();
+            byte shopState = br.ReadByte();
+            int itemIndex = br.ReadInt32();
+            bool exitingShop = br.ReadBoolean();
+
+            ApplyRemoteShopStateSync(playerId, shopState, itemIndex, exitingShop);
+        }
+
+        public void ApplyRemoteShopStateSync(byte playerId, byte shopState, int itemIndex, bool exitingShop)
+        {
+            if (ShopScene.Current == null)
+                return;
+
+            _applyingRemoteShopState = true;
+            try
+            {
+                FieldInfo s1Field = typeof(ShopScene).GetField("playerOne", AllFlags);
+                FieldInfo s2Field = typeof(ShopScene).GetField("playerTwo", AllFlags);
+                if (s1Field == null || s2Field == null)
+                    return;
+
+                ShopScenePlayer shopP1 = s1Field.GetValue(ShopScene.Current) as ShopScenePlayer;
+                ShopScenePlayer shopP2 = s2Field.GetValue(ShopScene.Current) as ShopScenePlayer;
+                ShopScenePlayer remoteShop = (_transport.Role == CoopRole.Client) ? shopP1 : shopP2;
+                if (remoteShop == null)
+                    return;
+
+                FieldInfo stateField = typeof(ShopScenePlayer).GetField("state", AllFlags);
+                FieldInfo idxField = typeof(ShopScenePlayer).GetField("index", AllFlags);
+                FieldInfo itemsField = typeof(ShopScenePlayer).GetField("items", AllFlags);
+                FieldInfo exitingField = typeof(ShopScenePlayer).GetField("exitingShop", AllFlags);
+                MethodInfo updateSelMethod = typeof(ShopScenePlayer).GetMethod("UpdateSelection", AllFlags);
+                MethodInfo exitMethod = typeof(ShopScenePlayer).GetMethod("Exit", AllFlags);
+                MethodInfo onStartMethod = typeof(ShopScenePlayer).GetMethod("OnStart", AllFlags);
+                MethodInfo shopOnExitMethod = typeof(ShopScene).GetMethod("OnExit", AllFlags);
+
+                if (exitingField != null)
+                {
+                    exitingField.SetValue(remoteShop, exitingShop);
+                }
+
+                if (idxField != null && itemsField != null)
+                {
+                    IList itemsList = itemsField.GetValue(remoteShop) as IList;
+                    if (itemsList != null && itemsList.Count > 0)
+                    {
+                        int clampedIdx = Mathf.Clamp(itemIndex, 0, itemsList.Count - 1);
+                        idxField.SetValue(remoteShop, clampedIdx);
+                        if ((shopState == 1 || shopState == 2 || shopState == 3) && updateSelMethod != null)
+                        {
+                            updateSelMethod.Invoke(remoteShop, null);
+                        }
+                    }
+                }
+
+                int curRemoteState = stateField != null ? Convert.ToInt32(stateField.GetValue(remoteShop)) : 0;
+                if (shopState == 4 || shopState == 5) // Exiting = 4, Exited = 5
+                {
+                    if (curRemoteState != 4 && curRemoteState != 5 && exitMethod != null)
+                    {
+                        exitMethod.Invoke(remoteShop, null);
+                    }
+                    if (shopState == 5 && stateField != null)
+                    {
+                        stateField.SetValue(remoteShop, Enum.ToObject(stateField.FieldType, 5));
+                        if (shopOnExitMethod != null)
+                        {
+                            // Vanilla ShopScene.OnExit() checks BOTH playerOne.state and playerTwo.state
+                            // and only starts exit_cr() if BOTH players have exited!
+                            shopOnExitMethod.Invoke(ShopScene.Current, null);
+                        }
+                    }
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Shop: Partner state=" + shopState + " (waiting for both players to press Exit).");
+                }
+                else if (shopState == 1 && (curRemoteState == 4 || curRemoteState == 5))
+                {
+                    if (stateField != null)
+                    {
+                        stateField.SetValue(remoteShop, Enum.ToObject(stateField.FieldType, 1));
+                    }
+                    if (onStartMethod != null)
+                    {
+                        onStartMethod.Invoke(remoteShop, null);
+                    }
+                    CupheadCoopBootstrapper.Log("[CoopDiag] Shop: Partner canceled Exit and returned to browsing.");
+                }
+            }
+            catch (Exception ex)
+            {
+                CupheadCoopBootstrapper.Log("ApplyRemoteShopStateSync warning: " + ex.Message);
+            }
+            finally
+            {
+                _applyingRemoteShopState = false;
             }
         }
 
@@ -2569,12 +4019,81 @@ namespace CupheadCoop
             }
         }
 
+        public static void StopAllResidualPlayerMovement()
+        {
+            try
+            {
+                PlayerId[] ids = new PlayerId[] { PlayerId.PlayerOne, PlayerId.PlayerTwo };
+                for (int i = 0; i < ids.Length; i++)
+                {
+                    AbstractPlayerController ctrl = PlayerManager.GetPlayer(ids[i]);
+                    if (ctrl == null) continue;
+
+                    Rigidbody2D rb = ctrl.GetComponent<Rigidbody2D>();
+                    if (rb != null) rb.velocity = Vector2.zero;
+
+                    LevelPlayerController lvl = ctrl as LevelPlayerController;
+                    if (lvl != null)
+                    {
+                        if (lvl.motor != null)
+                        {
+                            lvl.motor.DisableInput();
+                            lvl.motor.EnableInput();
+                        }
+                        if (lvl.weaponManager != null && lvl.weaponManager.IsShooting)
+                        {
+                            lvl.weaponManager.IsShooting = false;
+                            MethodInfo endBasic = typeof(LevelPlayerWeaponManager).GetMethod("EndBasic", AllFlags);
+                            if (endBasic != null) endBasic.Invoke(lvl.weaponManager, null);
+                        }
+                    }
+
+                    PlanePlayerController pl = ctrl as PlanePlayerController;
+                    if (pl != null && pl.weaponManager != null && pl.weaponManager.IsShooting)
+                    {
+                        pl.weaponManager.IsShooting = false;
+                        MethodInfo endBasic = typeof(PlanePlayerWeaponManager).GetMethod("EndBasic", AllFlags);
+                        if (endBasic != null) endBasic.Invoke(pl.weaponManager, null);
+                    }
+                }
+
+                if (Map.Current != null && Map.Current.players != null)
+                {
+                    FieldInfo axisField = typeof(MapPlayerMotor).GetField("axis", AllFlags);
+                    PropertyInfo velProp = typeof(MapPlayerMotor).GetProperty("velocity", AllFlags);
+                    for (int i = 0; i < Map.Current.players.Length; i++)
+                    {
+                        MapPlayerController mp = Map.Current.players[i];
+                        if (mp == null) continue;
+                        Rigidbody2D mrb = mp.GetComponent<Rigidbody2D>();
+                        if (mrb != null) mrb.velocity = Vector2.zero;
+                        if (mp.motor != null)
+                        {
+                            if (axisField != null) axisField.SetValue(mp.motor, Vector2.zero);
+                            if (velProp != null) velProp.SetValue(mp.motor, Vector2.zero, null);
+                        }
+                        if (mp.animator != null)
+                        {
+                            mp.animator.SetInteger("Speed", 0);
+                            if (mp.animator.GetInteger("X") == 0 && mp.animator.GetInteger("Y") == 0)
+                            {
+                                mp.animator.SetInteger("Y", -1);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
         private void RestoreDefaultInputs()
         {
             try
             {
                 if (!ReInput.isReady)
                     return;
+
+                StopAllResidualPlayerMovement();
 
                 AbstractPlayerController p1 = PlayerManager.GetPlayer(PlayerId.PlayerOne);
                 if (p1 != null)
@@ -2585,6 +4104,29 @@ namespace CupheadCoop
                         p1.damageReceiver.enabled = true;
                     if (p1.stats != null)
                         SetPlayerHardInvincibility(p1.stats, false);
+
+                    LevelPlayerController l1 = p1 as LevelPlayerController;
+                    if (l1 != null)
+                    {
+                        if (l1.motor != null)
+                        {
+                            l1.motor.enabled = true;
+                            l1.motor.EnableInput();
+                        }
+                        if (l1.weaponManager != null)
+                        {
+                            l1.weaponManager.enabled = true;
+                            FieldInfo allowField = typeof(LevelPlayerWeaponManager).GetField("allowInput", AllFlags);
+                            if (allowField != null) allowField.SetValue(l1.weaponManager, true);
+                        }
+                    }
+
+                    PlanePlayerController pl1 = p1 as PlanePlayerController;
+                    if (pl1 != null)
+                    {
+                        if (pl1.motor != null) pl1.motor.enabled = true;
+                        if (pl1.weaponManager != null) pl1.weaponManager.enabled = true;
+                    }
                 }
 
                 AbstractPlayerController p2 = PlayerManager.GetPlayer(PlayerId.PlayerTwo);
@@ -2596,6 +4138,21 @@ namespace CupheadCoop
                         p2.damageReceiver.enabled = true;
                     if (p2.stats != null)
                         SetPlayerHardInvincibility(p2.stats, false);
+                }
+
+                // Issue #12 (v1.3.2): Also restore World Map PlayerOne input, motor, and animationController!
+                if (Map.Current != null && Map.Current.players != null && Map.Current.players.Length > 0)
+                {
+                    MapPlayerController mapP1 = Map.Current.players[0];
+                    if (mapP1 != null)
+                    {
+                        if (mapP1.input != null)
+                            SetPlayerInputActions(mapP1.input, ReInput.players.GetPlayer(0));
+                        if (mapP1.motor != null)
+                            mapP1.motor.enabled = true;
+                        if (mapP1.animationController != null)
+                            mapP1.animationController.enabled = true;
+                    }
                 }
             }
             catch { }
@@ -3046,6 +4603,553 @@ namespace CupheadCoop
             }
         }
 
+        // =====================================================================
+        // 13. ENEMY, SPAWNER & MINION SYNC (Issue #10 - Run-n-Gun, Plane, Carrots)
+        // =====================================================================
+
+        private static int GetSpawnerStableHash(PlatformingLevelEnemySpawner spawner)
+        {
+            if (spawner == null) return 0;
+            int posHash = ((int)Mathf.Round(spawner.transform.position.x * 0.5f) * 73856093)
+                ^ ((int)Mathf.Round(spawner.transform.position.y * 0.5f) * 19349663);
+            return GetStableStringHash(spawner.GetType().Name) ^ posHash;
+        }
+
+        private void MonitorEnemiesAndSpawners()
+        {
+            if (Level.Current == null || Level.Current.Ending || Level.Won || Level.Current is MausoleumLevel)
+                return;
+
+            try
+            {
+                // 1. PlatformingLevelEnemySpawner trigger synchronization
+                PlatformingLevelEnemySpawner[] spawners = UnityEngine.Object.FindObjectsOfType<PlatformingLevelEnemySpawner>();
+                if (spawners != null && spawners.Length > 0)
+                {
+                    FieldInfo startedField = typeof(PlatformingLevelEnemySpawner).GetField("started", AllFlags);
+                    FieldInfo endedField = typeof(PlatformingLevelEnemySpawner).GetField("ended", AllFlags);
+                    if (startedField != null && endedField != null)
+                    {
+                        for (int i = 0; i < spawners.Length; i++)
+                        {
+                            PlatformingLevelEnemySpawner sp = spawners[i];
+                            if (sp == null) continue;
+                            int spHash = GetSpawnerStableHash(sp);
+
+                            if (_transport.Role == CoopRole.Host)
+                            {
+                                bool isStarted = (bool)startedField.GetValue(sp);
+                                bool isEnded = (bool)endedField.GetValue(sp);
+
+                                if (isStarted && _startedSpawnerHashes.Add(spHash))
+                                {
+                                    byte[] pkt = CoopProtocol.BuildLevelEvent(
+                                        LevelEventType.SpawnerTriggerSync,
+                                        (byte)PlayerId.PlayerOne,
+                                        1f,
+                                        0f,
+                                        spHash);
+                                    _transport.Send(pkt, true);
+                                }
+                                if (isEnded && _endedSpawnerHashes.Add(spHash))
+                                {
+                                    byte[] pkt = CoopProtocol.BuildLevelEvent(
+                                        LevelEventType.SpawnerTriggerSync,
+                                        (byte)PlayerId.PlayerOne,
+                                        2f,
+                                        0f,
+                                        spHash);
+                                    _transport.Send(pkt, true);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Active enemies & boss summons (AbstractPlatformingLevelEnemy + VeggiesLevelCarrotHomingProjectile)
+                if (_localTick % 5 != 0)
+                    return;
+
+                AbstractPlatformingLevelEnemy[] platEnemies = UnityEngine.Object.FindObjectsOfType<AbstractPlatformingLevelEnemy>();
+                VeggiesLevelCarrotHomingProjectile[] carrotProjectiles = UnityEngine.Object.FindObjectsOfType<VeggiesLevelCarrotHomingProjectile>();
+
+                int platLen = platEnemies != null ? platEnemies.Length : 0;
+                int carrotLen = carrotProjectiles != null ? carrotProjectiles.Length : 0;
+                if (platLen == 0 && carrotLen == 0 && _hostEnemyLastKnownHp.Count == 0)
+                    return;
+
+                FieldInfo carrotHpField = typeof(VeggiesLevelCarrotHomingProjectile).GetField("health", AllFlags);
+                FieldInfo platStartedBf = typeof(AbstractPlatformingLevelEnemy).GetField("<_started>k__BackingField", AllFlags);
+
+                if (_transport.Role == CoopRole.Host)
+                {
+                    List<EnemySyncEntry> entries = new List<EnemySyncEntry>(24);
+                    HashSet<int> currentAliveIds = new HashSet<int>();
+
+                    for (int i = 0; i < platLen && entries.Count < 22; i++)
+                    {
+                        AbstractPlatformingLevelEnemy e = platEnemies[i];
+                        if (e == null) continue;
+                        int id = e.GetInstanceID();
+                        int typeHash = GetStableStringHash(e.GetType().Name);
+
+                        if (e.Dead || e.Health <= 0f)
+                        {
+                            if (_hostEnemyLastKnownHp.ContainsKey(id) && _killedEnemyKeys.Add(id))
+                            {
+                                entries.Add(new EnemySyncEntry
+                                {
+                                    EnemyKey = id,
+                                    TypeHash = typeHash,
+                                    PosX = e.transform.position.x,
+                                    PosY = e.transform.position.y,
+                                    Health = 0f,
+                                    ScaleX = (sbyte)(e.transform.localScale.x < 0f ? -1 : 1),
+                                    StateFlags = 2 // Dead
+                                });
+                                _hostEnemyLastKnownHp.Remove(id);
+                                _hostEnemyLastKnownPos.Remove(id);
+                                _hostEnemyLastKnownType.Remove(id);
+                            }
+                            continue;
+                        }
+
+                        bool isEnemyStarted = platStartedBf == null || (bool)platStartedBf.GetValue(e);
+                        if (!isEnemyStarted)
+                            continue;
+
+                        currentAliveIds.Add(id);
+                        _hostEnemyLastKnownHp[id] = e.Health;
+                        _hostEnemyLastKnownPos[id] = new Vector2(e.transform.position.x, e.transform.position.y);
+                        _hostEnemyLastKnownType[id] = typeHash;
+
+                        entries.Add(new EnemySyncEntry
+                        {
+                            EnemyKey = id,
+                            TypeHash = typeHash,
+                            PosX = e.transform.position.x,
+                            PosY = e.transform.position.y,
+                            Health = e.Health,
+                            ScaleX = (sbyte)(e.transform.localScale.x < 0f ? -1 : 1),
+                            StateFlags = 1 // Alive
+                        });
+                    }
+
+                    int carrotTypeHash = GetStableStringHash("VeggiesLevelCarrotHomingProjectile");
+                    for (int i = 0; i < carrotLen && entries.Count < 24; i++)
+                    {
+                        VeggiesLevelCarrotHomingProjectile c = carrotProjectiles[i];
+                        if (c == null) continue;
+                        int id = c.GetInstanceID();
+                        float hp = carrotHpField != null ? (float)carrotHpField.GetValue(c) : 10f;
+                        if (hp <= 0f)
+                            continue;
+
+                        currentAliveIds.Add(id);
+                        _hostEnemyLastKnownHp[id] = hp;
+                        _hostEnemyLastKnownPos[id] = new Vector2(c.transform.position.x, c.transform.position.y);
+                        _hostEnemyLastKnownType[id] = carrotTypeHash;
+
+                        entries.Add(new EnemySyncEntry
+                        {
+                            EnemyKey = id,
+                            TypeHash = carrotTypeHash,
+                            PosX = c.transform.position.x,
+                            PosY = c.transform.position.y,
+                            Health = hp,
+                            ScaleX = 1,
+                            StateFlags = 1 // Alive
+                        });
+                    }
+
+                    // Emit Death notices for any previously tracked enemy that was Destroyed since last snapshot
+                    if (_hostEnemyLastKnownHp.Count > currentAliveIds.Count)
+                    {
+                        List<int> vanishedIds = new List<int>();
+                        foreach (KeyValuePair<int, float> kvp in _hostEnemyLastKnownHp)
+                        {
+                            if (!currentAliveIds.Contains(kvp.Key))
+                                vanishedIds.Add(kvp.Key);
+                        }
+                        for (int i = 0; i < vanishedIds.Count; i++)
+                        {
+                            int vid = vanishedIds[i];
+                            Vector2 lastPos = _hostEnemyLastKnownPos.ContainsKey(vid) ? _hostEnemyLastKnownPos[vid] : Vector2.zero;
+                            int tHash = _hostEnemyLastKnownType.ContainsKey(vid) ? _hostEnemyLastKnownType[vid] : 0;
+                            if (entries.Count < 28 && _killedEnemyKeys.Add(vid))
+                            {
+                                entries.Add(new EnemySyncEntry
+                                {
+                                    EnemyKey = vid,
+                                    TypeHash = tHash,
+                                    PosX = lastPos.x,
+                                    PosY = lastPos.y,
+                                    Health = 0f,
+                                    ScaleX = 1,
+                                    StateFlags = 2 // Dead
+                                });
+                            }
+                            _hostEnemyLastKnownHp.Remove(vid);
+                            _hostEnemyLastKnownPos.Remove(vid);
+                            _hostEnemyLastKnownType.Remove(vid);
+                        }
+                    }
+
+                    if (entries.Count > 0)
+                    {
+                        byte[] pkt = CoopProtocol.BuildEnemySync(true, entries.ToArray(), entries.Count);
+                        _transport.Send(pkt, false);
+                    }
+                }
+                else if (_transport.Role == CoopRole.Client)
+                {
+                    // Report local Client damage dealt to enemies back to Host
+                    List<EnemySyncEntry> dmgReports = null;
+                    for (int i = 0; i < platLen; i++)
+                    {
+                        AbstractPlatformingLevelEnemy e = platEnemies[i];
+                        if (e == null) continue;
+                        bool isEnemyStarted = platStartedBf == null || (bool)platStartedBf.GetValue(e);
+                        if (!isEnemyStarted) continue;
+                        int id = e.GetInstanceID();
+                        float curHp = e.Dead ? 0f : e.Health;
+                        float prevHp;
+                        if (!_clientEnemyLastReportedHp.TryGetValue(id, out prevHp))
+                        {
+                            _clientEnemyLastReportedHp[id] = curHp;
+                            continue;
+                        }
+                        if (curHp < prevHp - 0.1f)
+                        {
+                            float dmgDealt = prevHp - Mathf.Max(0f, curHp);
+                            _clientEnemyLastReportedHp[id] = curHp;
+                            if (dmgReports == null) dmgReports = new List<EnemySyncEntry>(4);
+                            dmgReports.Add(new EnemySyncEntry
+                            {
+                                EnemyKey = id,
+                                TypeHash = GetStableStringHash(e.GetType().Name),
+                                PosX = e.transform.position.x,
+                                PosY = e.transform.position.y,
+                                Health = dmgDealt,
+                                ScaleX = 1,
+                                StateFlags = (byte)(e.Dead || curHp <= 0f ? 6 : 4) // 4=Damage, 2=Dead
+                            });
+                        }
+                    }
+
+                    int carrotTypeHash = GetStableStringHash("VeggiesLevelCarrotHomingProjectile");
+                    for (int i = 0; i < carrotLen; i++)
+                    {
+                        VeggiesLevelCarrotHomingProjectile c = carrotProjectiles[i];
+                        if (c == null || carrotHpField == null) continue;
+                        int id = c.GetInstanceID();
+                        float curHp = (float)carrotHpField.GetValue(c);
+                        float prevHp;
+                        if (!_clientEnemyLastReportedHp.TryGetValue(id, out prevHp))
+                        {
+                            _clientEnemyLastReportedHp[id] = curHp;
+                            continue;
+                        }
+                        if (curHp < prevHp - 0.1f)
+                        {
+                            float dmgDealt = prevHp - Mathf.Max(0f, curHp);
+                            _clientEnemyLastReportedHp[id] = curHp;
+                            if (dmgReports == null) dmgReports = new List<EnemySyncEntry>(4);
+                            dmgReports.Add(new EnemySyncEntry
+                            {
+                                EnemyKey = id,
+                                TypeHash = carrotTypeHash,
+                                PosX = c.transform.position.x,
+                                PosY = c.transform.position.y,
+                                Health = dmgDealt,
+                                ScaleX = 1,
+                                StateFlags = (byte)(curHp <= 0f ? 6 : 4)
+                            });
+                        }
+                    }
+
+                    if (dmgReports != null && dmgReports.Count > 0)
+                    {
+                        byte[] pkt = CoopProtocol.BuildEnemySync(false, dmgReports.ToArray(), dmgReports.Count);
+                        _transport.Send(pkt, true);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void HandleEnemySync(BinaryReader br)
+        {
+            bool isHostSnapshot = br.ReadBoolean();
+            ushort count = br.ReadUInt16();
+            EnemySyncEntry[] entries = new EnemySyncEntry[count];
+            for (int i = 0; i < count; i++)
+            {
+                entries[i].EnemyKey = br.ReadInt32();
+                entries[i].TypeHash = br.ReadInt32();
+                entries[i].PosX = br.ReadSingle();
+                entries[i].PosY = br.ReadSingle();
+                entries[i].Health = br.ReadSingle();
+                entries[i].ScaleX = br.ReadSByte();
+                entries[i].StateFlags = br.ReadByte();
+            }
+            ApplyRemoteEnemySync(isHostSnapshot, entries);
+        }
+
+        public void ApplyRemoteEnemySync(bool isHostSnapshot, EnemySyncEntry[] entries)
+        {
+            if (Level.Current == null || Level.Current.Ending || Level.Won || entries == null)
+                return;
+
+            try
+            {
+                AbstractPlatformingLevelEnemy[] platEnemies = UnityEngine.Object.FindObjectsOfType<AbstractPlatformingLevelEnemy>();
+                VeggiesLevelCarrotHomingProjectile[] carrotProjectiles = UnityEngine.Object.FindObjectsOfType<VeggiesLevelCarrotHomingProjectile>();
+                FieldInfo platHpBf = typeof(AbstractPlatformingLevelEnemy).GetField("<Health>k__BackingField", AllFlags);
+                FieldInfo platStartedBf = typeof(AbstractPlatformingLevelEnemy).GetField("<_started>k__BackingField", AllFlags);
+                MethodInfo platDieMethod = typeof(AbstractPlatformingLevelEnemy).GetMethod("Die", AllFlags);
+                MethodInfo platOnStartMethod = typeof(AbstractPlatformingLevelEnemy).GetMethod("OnStart", AllFlags);
+                FieldInfo carrotHpField = typeof(VeggiesLevelCarrotHomingProjectile).GetField("health", AllFlags);
+                MethodInfo carrotDieMethod = typeof(VeggiesLevelCarrotHomingProjectile).GetMethod("Die", AllFlags);
+                int carrotTypeHash = GetStableStringHash("VeggiesLevelCarrotHomingProjectile");
+
+                if (isHostSnapshot && _transport.Role == CoopRole.Client)
+                {
+                    HashSet<int> matchedLocalIds = new HashSet<int>();
+
+                    for (int i = 0; i < entries.Length; i++)
+                    {
+                        EnemySyncEntry e = entries[i];
+                        bool isDeadEntry = (e.StateFlags & 2) != 0;
+
+                        if (e.TypeHash == carrotTypeHash)
+                        {
+                            if (carrotProjectiles == null) continue;
+                            VeggiesLevelCarrotHomingProjectile bestCarrot = null;
+                            float bestDist = float.MaxValue;
+                            for (int j = 0; j < carrotProjectiles.Length; j++)
+                            {
+                                VeggiesLevelCarrotHomingProjectile c = carrotProjectiles[j];
+                                if (c == null || matchedLocalIds.Contains(c.GetInstanceID())) continue;
+                                float d = Vector2.Distance(new Vector2(c.transform.position.x, c.transform.position.y), new Vector2(e.PosX, e.PosY));
+                                if (d < bestDist)
+                                {
+                                    bestDist = d;
+                                    bestCarrot = c;
+                                }
+                            }
+
+                            if (bestCarrot != null && bestDist <= 650f)
+                            {
+                                int cid = bestCarrot.GetInstanceID();
+                                matchedLocalIds.Add(cid);
+                                _clientEnemyLastHostSeenTime[cid] = Time.unscaledTime;
+                                if (isDeadEntry || e.Health <= 0f)
+                                {
+                                    if (carrotDieMethod != null) carrotDieMethod.Invoke(bestCarrot, null);
+                                }
+                                else
+                                {
+                                    Vector3 targetPos = new Vector3(e.PosX, e.PosY, bestCarrot.transform.position.z);
+                                    if (bestDist > 160f)
+                                        bestCarrot.transform.position = targetPos;
+                                    else
+                                        bestCarrot.transform.position = Vector3.Lerp(bestCarrot.transform.position, targetPos, 0.65f);
+
+                                    if (carrotHpField != null)
+                                    {
+                                        carrotHpField.SetValue(bestCarrot, e.Health);
+                                        _clientEnemyLastReportedHp[cid] = e.Health;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        if (platEnemies == null) continue;
+                        AbstractPlatformingLevelEnemy bestEnemy = null;
+                        float bestEnemyDist = float.MaxValue;
+                        for (int j = 0; j < platEnemies.Length; j++)
+                        {
+                            AbstractPlatformingLevelEnemy pe = platEnemies[j];
+                            if (pe == null || pe.Dead || matchedLocalIds.Contains(pe.GetInstanceID()))
+                                continue;
+                            if (GetStableStringHash(pe.GetType().Name) != e.TypeHash)
+                                continue;
+
+                            float d = Vector2.Distance(new Vector2(pe.transform.position.x, pe.transform.position.y), new Vector2(e.PosX, e.PosY));
+                            if (d < bestEnemyDist)
+                            {
+                                bestEnemyDist = d;
+                                bestEnemy = pe;
+                            }
+                        }
+
+                        if (bestEnemy != null && bestEnemyDist <= 650f)
+                        {
+                            int pid = bestEnemy.GetInstanceID();
+                            matchedLocalIds.Add(pid);
+                            _clientEnemyLastHostSeenTime[pid] = Time.unscaledTime;
+
+                            if (isDeadEntry || e.Health <= 0f)
+                            {
+                                if (platDieMethod != null) platDieMethod.Invoke(bestEnemy, null);
+                            }
+                            else
+                            {
+                                bool isEnemyStarted = platStartedBf != null && (bool)platStartedBf.GetValue(bestEnemy);
+                                if (!isEnemyStarted && platOnStartMethod != null)
+                                {
+                                    try { platOnStartMethod.Invoke(bestEnemy, null); } catch { }
+                                }
+                                Vector3 targetPos = new Vector3(e.PosX, e.PosY, bestEnemy.transform.position.z);
+                                if (bestEnemyDist > 180f)
+                                    bestEnemy.transform.position = targetPos;
+                                else
+                                    bestEnemy.transform.position = Vector3.Lerp(bestEnemy.transform.position, targetPos, 0.65f);
+
+                                if (platHpBf != null)
+                                {
+                                    platHpBf.SetValue(bestEnemy, e.Health);
+                                    _clientEnemyLastReportedHp[pid] = e.Health;
+                                }
+                            }
+                        }
+                    }
+
+                    // Clean up phantom Client-only spawned enemies that were never seen on Host after 0.85s
+                    if (platEnemies != null)
+                    {
+                        for (int j = 0; j < platEnemies.Length; j++)
+                        {
+                            AbstractPlatformingLevelEnemy pe = platEnemies[j];
+                            if (pe == null || pe.Dead) continue;
+                            bool isEnemyStarted = platStartedBf == null || (bool)platStartedBf.GetValue(pe);
+                            if (!isEnemyStarted) continue;
+                            int pid = pe.GetInstanceID();
+                            if (matchedLocalIds.Contains(pid)) continue;
+
+                            float firstSeen;
+                            if (!_clientEnemySpawnGraceTime.TryGetValue(pid, out firstSeen))
+                            {
+                                _clientEnemySpawnGraceTime[pid] = Time.unscaledTime;
+                                continue;
+                            }
+
+                            float lastHostSeen;
+                            bool seenOnHostRecently = _clientEnemyLastHostSeenTime.TryGetValue(pid, out lastHostSeen)
+                                && (Time.unscaledTime - lastHostSeen) < 0.85f;
+                            if (!seenOnHostRecently && (Time.unscaledTime - firstSeen) > 0.85f)
+                            {
+                                UnityEngine.Object.Destroy(pe.gameObject);
+                            }
+                        }
+                    }
+                }
+                else if (!isHostSnapshot && _transport.Role == CoopRole.Host)
+                {
+                    // Apply Client damage reports onto Host authoritative enemies
+                    for (int i = 0; i < entries.Length; i++)
+                    {
+                        EnemySyncEntry e = entries[i];
+                        bool clientKilled = (e.StateFlags & 2) != 0;
+                        float dmg = Mathf.Max(0f, e.Health);
+
+                        if (e.TypeHash == carrotTypeHash)
+                        {
+                            if (carrotProjectiles == null) continue;
+                            VeggiesLevelCarrotHomingProjectile bestCarrot = null;
+                            float bestDist = float.MaxValue;
+                            for (int j = 0; j < carrotProjectiles.Length; j++)
+                            {
+                                VeggiesLevelCarrotHomingProjectile c = carrotProjectiles[j];
+                                if (c == null) continue;
+                                float d = Vector2.Distance(new Vector2(c.transform.position.x, c.transform.position.y), new Vector2(e.PosX, e.PosY));
+                                if (d < bestDist) { bestDist = d; bestCarrot = c; }
+                            }
+                            if (bestCarrot != null && bestDist <= 500f && carrotHpField != null)
+                            {
+                                float curHp = (float)carrotHpField.GetValue(bestCarrot) - dmg;
+                                carrotHpField.SetValue(bestCarrot, curHp);
+                                if ((clientKilled || curHp <= 0f) && carrotDieMethod != null)
+                                {
+                                    carrotDieMethod.Invoke(bestCarrot, null);
+                                }
+                            }
+                            continue;
+                        }
+
+                        if (platEnemies == null) continue;
+                        AbstractPlatformingLevelEnemy bestEnemy = null;
+                        float bestEnemyDist = float.MaxValue;
+                        for (int j = 0; j < platEnemies.Length; j++)
+                        {
+                            AbstractPlatformingLevelEnemy pe = platEnemies[j];
+                            if (pe == null || pe.Dead || GetStableStringHash(pe.GetType().Name) != e.TypeHash)
+                                continue;
+                            float d = Vector2.Distance(new Vector2(pe.transform.position.x, pe.transform.position.y), new Vector2(e.PosX, e.PosY));
+                            if (d < bestEnemyDist) { bestEnemyDist = d; bestEnemy = pe; }
+                        }
+                        if (bestEnemy != null && bestEnemyDist <= 500f && platHpBf != null)
+                        {
+                            float curHp = bestEnemy.Health - dmg;
+                            platHpBf.SetValue(bestEnemy, curHp);
+                            if ((clientKilled || curHp <= 0f) && platDieMethod != null)
+                            {
+                                platDieMethod.Invoke(bestEnemy, null);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public void ApplyRemoteSpawnerTriggerSync(int spawnerHash, bool isStart)
+        {
+            if (Level.Current == null)
+                return;
+
+            try
+            {
+                PlatformingLevelEnemySpawner[] spawners = UnityEngine.Object.FindObjectsOfType<PlatformingLevelEnemySpawner>();
+                if (spawners == null) return;
+
+                FieldInfo startedField = typeof(PlatformingLevelEnemySpawner).GetField("started", AllFlags);
+                FieldInfo endedField = typeof(PlatformingLevelEnemySpawner).GetField("ended", AllFlags);
+                MethodInfo startSpawningMethod = typeof(PlatformingLevelEnemySpawner).GetMethod("StartSpawning", AllFlags);
+                MethodInfo endSpawningMethod = typeof(PlatformingLevelEnemySpawner).GetMethod("EndSpawning", AllFlags);
+
+                for (int i = 0; i < spawners.Length; i++)
+                {
+                    PlatformingLevelEnemySpawner sp = spawners[i];
+                    if (sp == null || GetSpawnerStableHash(sp) != spawnerHash)
+                        continue;
+
+                    if (isStart)
+                    {
+                        bool alreadyStarted = startedField != null && (bool)startedField.GetValue(sp);
+                        if (!alreadyStarted)
+                        {
+                            if (startedField != null) startedField.SetValue(sp, true);
+                            if (startSpawningMethod != null) startSpawningMethod.Invoke(sp, null);
+                        }
+                    }
+                    else
+                    {
+                        bool alreadyEnded = endedField != null && (bool)endedField.GetValue(sp);
+                        if (!alreadyEnded)
+                        {
+                            if (endedField != null) endedField.SetValue(sp, true);
+                            if (endSpawningMethod != null) endSpawningMethod.Invoke(sp, null);
+                        }
+                    }
+                    break;
+                }
+            }
+            catch { }
+        }
+
         private void EnsureLevelHooks()
         {
             if (Level.Current == null || _hookedLevel == Level.Current)
@@ -3061,9 +5165,24 @@ namespace CupheadCoop
             _lastHostBossCurrentHealth = -1f;
             _lastHostBossStateIndex = 0;
             _hostConfirmedLevelWin = false;
+            _wasLocalShooting = false;
+            _wasRemoteParrying = false;
+            _wasRemotePlaneShrunk = false;
+            _wasRemotePlaneShooting = false;
+            _lastSentPlaneWeaponId = 0;
             _processedDeathEffects.Clear();
             _syncedCoinHashes.Clear();
             _parriedMausoleumGhostIds.Clear();
+            _clientBoundMausoleumGhosts.Clear();
+            _startedSpawnerHashes.Clear();
+            _endedSpawnerHashes.Clear();
+            _clientEnemyLastHostSeenTime.Clear();
+            _clientEnemySpawnGraceTime.Clear();
+            _hostEnemyLastKnownHp.Clear();
+            _hostEnemyLastKnownPos.Clear();
+            _hostEnemyLastKnownType.Clear();
+            _killedEnemyKeys.Clear();
+            _clientEnemyLastReportedHp.Clear();
             _hookedMausoleumInstanceId = 0;
             _sentMausoleumLose = false;
             SetIgnoreRemoteDeathWindow(2.5f);
@@ -3076,6 +5195,7 @@ namespace CupheadCoop
 
                 if (isSameSceneReload && !_applyingRemoteSceneLoad)
                 {
+                    _remoteReadyForLevelId = -1;
                     BeginLevelReadyGate((int)Level.Current.CurrentLevel);
 
                     if (_transport.Role == CoopRole.Host)
@@ -3211,7 +5331,14 @@ namespace CupheadCoop
                 if (mapCtrl != null)
                 {
                     sbyte mx = 0, my = 0;
-                    if (mapCtrl.input != null)
+                    PlayerStateFlags mapFlags = PlayerStateFlags.MapScene;
+                    bool isStationaryOrTransition = (mapCtrl.state != MapPlayerController.State.Walking)
+                        || (Map.Current.CurrentState != Map.State.Ready);
+                    if (isStationaryOrTransition)
+                    {
+                        mapFlags |= PlayerStateFlags.MapStationary;
+                    }
+                    else if (mapCtrl.input != null)
                     {
                         mx = (sbyte)mapCtrl.input.GetAxisInt(PlayerInput.Axis.X, false, false);
                         my = (sbyte)mapCtrl.input.GetAxisInt(PlayerInput.Axis.Y, false, false);
@@ -3227,7 +5354,7 @@ namespace CupheadCoop
                         VelY = mapCtrl.Velocity.y,
                         MoveX = mx,
                         MoveY = my,
-                        Flags = PlayerStateFlags.MapScene,
+                        Flags = mapFlags,
                         Health = 3,
                         HealthMax = 3
                     };
@@ -3323,6 +5450,32 @@ namespace CupheadCoop
                         {
                             pkt.CurrentWeaponId = (int)cwField.GetValue(planeCtrl.weaponManager);
                         }
+
+                        // Issue #9 (v1.3.2): Broadcast reliable WeaponAction packets for PlanePlayerController
+                        // weapon switches and basic start/end just like LevelPlayerController!
+                        if (pkt.CurrentWeaponId != 0 && pkt.CurrentWeaponId != _lastSentPlaneWeaponId)
+                        {
+                            _lastSentPlaneWeaponId = pkt.CurrentWeaponId;
+                            byte[] swPkt = CoopProtocol.BuildWeaponAction(
+                                (byte)localId,
+                                WeaponActionType.SwitchWeapon,
+                                pkt.CurrentWeaponId,
+                                1f,
+                                0f);
+                            _transport.Send(swPkt, true);
+                        }
+
+                        if (isShooting != _wasLocalShooting)
+                        {
+                            _wasLocalShooting = isShooting;
+                            byte[] wPkt = CoopProtocol.BuildWeaponAction(
+                                (byte)localId,
+                                isShooting ? WeaponActionType.BasicStart : WeaponActionType.BasicEnd,
+                                pkt.CurrentWeaponId,
+                                1f,
+                                0f);
+                            _transport.Send(wPkt, true);
+                        }
                     }
                 }
             }
@@ -3382,6 +5535,21 @@ namespace CupheadCoop
                             break;
                         case PacketType.MapLevelSelectSync:
                             HandleMapLevelSelectSync(br);
+                            break;
+                        case PacketType.DialogueSync:
+                            HandleDialogueSync(br);
+                            break;
+                        case PacketType.EquipMenuSync:
+                            HandleEquipMenuSync(br);
+                            break;
+                        case PacketType.ShopStateSync:
+                            HandleShopStateSync(br);
+                            break;
+                        case PacketType.MausoleumGhostSync:
+                            HandleMausoleumGhostSync(br);
+                            break;
+                        case PacketType.EnemySync:
+                            HandleEnemySync(br);
                             break;
                     }
                 }
@@ -3446,7 +5614,11 @@ namespace CupheadCoop
                 {
                     SendWorldSaveMirror();
                     string activeScene = SceneManager.GetActiveScene().name;
-                    if (!string.IsNullOrEmpty(activeScene) && activeScene != "scene_title" && activeScene != "scene_start")
+                    if (!string.IsNullOrEmpty(activeScene)
+                        && activeScene != "scene_title"
+                        && activeScene != "scene_start"
+                        && activeScene != "scene_slot_select"
+                        && activeScene != "scene_load_helper")
                     {
                         int lvlId = (int)SceneLoader.CurrentLevel;
                         int diff = Level.Current != null ? (int)Level.Current.mode : (int)Level.CurrentMode;
@@ -3460,6 +5632,11 @@ namespace CupheadCoop
             else if (stage == HandshakeStage.Welcome)
             {
                 SendHandshakeStage(HandshakeStage.Ready);
+            }
+
+            if (Map.Current != null && !BothPlayersHaveDlc)
+            {
+                DisableDlcBoatmanOnMap();
             }
 
             CupheadCoopBootstrapper.Log(string.Format(
@@ -3507,6 +5684,29 @@ namespace CupheadCoop
                 remoteLoadout.super = (Super)superId;
                 remoteLoadout.charm = (Charm)charmId;
                 remoteLoadout.HasEquippedSecondaryRegularWeapon = (secondaryWep != (int)Weapon.None && secondaryWep != 0);
+            }
+
+            // Issue #8 (v1.3.2): Immediately refresh the Equip Menu card front icons whenever a remote loadout arrives!
+            if (AbstractEquipUI.Current != null)
+            {
+                try
+                {
+                    FieldInfo cardField = typeof(AbstractEquipUI).GetField(targetId == PlayerId.PlayerTwo ? "playerTwo" : "playerOne", AllFlags);
+                    FieldInfo frontCardField = typeof(MapEquipUICard).GetField("front", AllFlags);
+                    if (cardField != null && frontCardField != null)
+                    {
+                        MapEquipUICard card = cardField.GetValue(AbstractEquipUI.Current) as MapEquipUICard;
+                        if (card != null)
+                        {
+                            MapEquipUICardFront cardFront = frontCardField.GetValue(card) as MapEquipUICardFront;
+                            if (cardFront != null)
+                            {
+                                cardFront.Refresh();
+                            }
+                        }
+                    }
+                }
+                catch { }
             }
         }
 
@@ -3593,13 +5793,38 @@ namespace CupheadCoop
                         else
                             mapRemote.transform.position = Vector3.Lerp(mapRemote.transform.position, targetPos, 0.7f);
 
-                        if (mapRemote.animator != null && mapRemote.state == MapPlayerController.State.Walking)
+                        if (mapRemote.animator != null)
                         {
-                            int mx = pkt.MoveX;
-                            int my = pkt.MoveY;
+                            // Issue #12 (v1.3.2): Never leave the remote puppet stuck spinning in the "Jump" state
+                            // when entering or exiting a non-won location on the World Map, and never set (X=0, Y=0)
+                            // on the 8-way directional Animator (preserve last facing direction, defaulting to (0, -1))!
+                            if (!Level.Won)
+                            {
+                                AnimatorStateInfo st = mapRemote.animator.GetCurrentAnimatorStateInfo(0);
+                                if (st.IsName("Jump") || st.IsName("WinChalice_Loop"))
+                                {
+                                    mapRemote.animator.SetTrigger("OnJumpComplete");
+                                }
+                            }
+
+                            bool isStationary = (pkt.Flags & PlayerStateFlags.MapStationary) != 0
+                                || mapRemote.state != MapPlayerController.State.Walking;
+                            int mx = isStationary ? 0 : pkt.MoveX;
+                            int my = isStationary ? 0 : pkt.MoveY;
                             int speed = (mx != 0 || my != 0) ? 1 : 0;
-                            mapRemote.animator.SetInteger("X", mx);
-                            mapRemote.animator.SetInteger("Y", my);
+
+                            if (mx != 0 || my != 0)
+                            {
+                                _lastRemoteMapFacingX = (sbyte)mx;
+                                _lastRemoteMapFacingY = (sbyte)my;
+                            }
+                            else if (_lastRemoteMapFacingX == 0 && _lastRemoteMapFacingY == 0)
+                            {
+                                _lastRemoteMapFacingY = -1;
+                            }
+
+                            mapRemote.animator.SetInteger("X", _lastRemoteMapFacingX);
+                            mapRemote.animator.SetInteger("Y", _lastRemoteMapFacingY);
                             mapRemote.animator.SetInteger("Speed", speed);
 
                             if (mx != 0 && mapRemote.animationController != null && mapRemote.animationController.spriteRenderer != null)
@@ -3762,12 +5987,35 @@ namespace CupheadCoop
                     }
 
                     bool isPlaneShooting = (pkt.Flags & PlayerStateFlags.Shooting) != 0;
-                    if (isPlaneShooting != _wasRemotePlaneShooting && planeRemote.weaponManager != null)
+                    if (planeRemote.weaponManager != null)
                     {
-                        _wasRemotePlaneShooting = isPlaneShooting;
-                        planeRemote.weaponManager.IsShooting = isPlaneShooting;
-                        MethodInfo m = typeof(PlanePlayerWeaponManager).GetMethod(isPlaneShooting ? "StartBasic" : "EndBasic", AllFlags);
-                        if (m != null) m.Invoke(planeRemote.weaponManager, null);
+                        EnsurePlaneWeaponsInitialized(planeRemote.weaponManager);
+
+                        if (pkt.CurrentWeaponId != 0)
+                        {
+                            FieldInfo cwField = typeof(PlanePlayerWeaponManager).GetField("currentWeapon", AllFlags);
+                            if (cwField != null)
+                            {
+                                Weapon cur = (Weapon)cwField.GetValue(planeRemote.weaponManager);
+                                if (cur != (Weapon)pkt.CurrentWeaponId)
+                                {
+                                    MethodInfo swMethod = typeof(PlanePlayerWeaponManager).GetMethod("SwitchWeapon", AllFlags);
+                                    if (swMethod != null)
+                                        swMethod.Invoke(planeRemote.weaponManager, new object[] { (Weapon)pkt.CurrentWeaponId });
+                                    else
+                                        cwField.SetValue(planeRemote.weaponManager, (Weapon)pkt.CurrentWeaponId);
+                                }
+                            }
+                        }
+
+                        // Issue #9 (v1.3.2): Self-heal plane shooting state if edge was missed across Retry!
+                        if (isPlaneShooting != _wasRemotePlaneShooting || (isPlaneShooting && !planeRemote.weaponManager.IsShooting))
+                        {
+                            _wasRemotePlaneShooting = isPlaneShooting;
+                            planeRemote.weaponManager.IsShooting = isPlaneShooting;
+                            MethodInfo m = typeof(PlanePlayerWeaponManager).GetMethod(isPlaneShooting ? "StartBasic" : "EndBasic", AllFlags);
+                            if (m != null) m.Invoke(planeRemote.weaponManager, null);
+                        }
                     }
                 }
             }
@@ -3844,8 +6092,36 @@ namespace CupheadCoop
                 PlanePlayerController planeRemote = remoteCtrl as PlanePlayerController;
                 if (planeRemote != null && planeRemote.weaponManager != null)
                 {
+                    EnsurePlaneWeaponsInitialized(planeRemote.weaponManager);
+
+                    FieldInfo cwField = typeof(PlanePlayerWeaponManager).GetField("currentWeapon", AllFlags);
+                    if (cwField != null && weaponId != 0)
+                    {
+                        Weapon cur = (Weapon)cwField.GetValue(planeRemote.weaponManager);
+                        if (cur != (Weapon)weaponId)
+                        {
+                            MethodInfo switchMethod = typeof(PlanePlayerWeaponManager).GetMethod("SwitchWeapon", AllFlags);
+                            if (switchMethod != null)
+                                switchMethod.Invoke(planeRemote.weaponManager, new object[] { (Weapon)weaponId });
+                            else
+                                cwField.SetValue(planeRemote.weaponManager, (Weapon)weaponId);
+                        }
+                    }
+
                     switch (action)
                     {
+                        case WeaponActionType.BasicStart:
+                            _wasRemotePlaneShooting = true;
+                            planeRemote.weaponManager.IsShooting = true;
+                            MethodInfo startPlaneBasic = typeof(PlanePlayerWeaponManager).GetMethod("StartBasic", AllFlags);
+                            if (startPlaneBasic != null) startPlaneBasic.Invoke(planeRemote.weaponManager, null);
+                            break;
+                        case WeaponActionType.BasicEnd:
+                            _wasRemotePlaneShooting = false;
+                            planeRemote.weaponManager.IsShooting = false;
+                            MethodInfo endPlaneBasic = typeof(PlanePlayerWeaponManager).GetMethod("EndBasic", AllFlags);
+                            if (endPlaneBasic != null) endPlaneBasic.Invoke(planeRemote.weaponManager, null);
+                            break;
                         case WeaponActionType.ExStart:
                             MethodInfo startPlaneEx = typeof(PlanePlayerWeaponManager).GetMethod("StartEx", AllFlags);
                             if (startPlaneEx != null) startPlaneEx.Invoke(planeRemote.weaponManager, null);
@@ -3921,6 +6197,14 @@ namespace CupheadCoop
                             if (delta > 0f)
                                 Level.Current.timeline.DealDamage(delta);
                         }
+                        CupheadCoopBootstrapper.Log("[CoopDiag] BossPhase: Client synced to phase stateIndex=" + playerIdByte + " (hp=" + valB + ", seed=" + intVal + ")");
+                    }
+                    break;
+
+                case LevelEventType.SpawnerTriggerSync:
+                    if (_transport.Role == CoopRole.Client)
+                    {
+                        ApplyRemoteSpawnerTriggerSync(intVal, valA < 1.5f);
                     }
                     break;
 
@@ -3951,26 +6235,43 @@ namespace CupheadCoop
                     }
                     if (_waitingAtLevelReadyGate && _levelReadyGateLevelId == intVal)
                     {
+                        CupheadCoopBootstrapper.Log("LevelReadyGate released via remote LevelReady event for level " + (Levels)intVal);
                         ReleaseLevelReadyGate();
+                    }
+                    else if (Level.Current != null && (int)Level.Current.CurrentLevel == intVal && _transport.IsConnected)
+                    {
+                        // Echo LevelReady back so the partner never gets stuck waiting if our initial packet arrived before their gate opened
+                        byte[] echoReady = CoopProtocol.BuildLevelEvent(
+                            LevelEventType.LevelReady,
+                            (byte)GetLocalPlayerId(),
+                            _sceneLoadSequence,
+                            _transport.Role == CoopRole.Host ? (float)_currentRngSeed : 0f,
+                            intVal);
+                        _transport.Send(echoReady, true);
                     }
                     break;
 
                 case LevelEventType.PauseSync:
+                    CupheadCoopBootstrapper.Log("[CoopDiag] PauseSync: Partner toggled pause=" + (intVal != 0));
                     ApplyRemotePauseSync(intVal != 0);
                     break;
 
                 case LevelEventType.PlayerDeath:
+                    CupheadCoopBootstrapper.Log("[CoopDiag] PlayerDeath: Partner (" + (PlayerId)playerIdByte + ") died at (" + valA.ToString("F1") + "," + valB.ToString("F1") + ")");
                     ApplyRemoteDeathEvent((PlayerId)playerIdByte, new Vector3(valA, valB, 0f));
                     break;
 
                 case LevelEventType.PlayerRevive:
                 case LevelEventType.PlayerStealHealthRevive:
+                    CupheadCoopBootstrapper.Log("[CoopDiag] PlayerRevive: (" + evtType + ") for " + (PlayerId)playerIdByte + " at (" + valA.ToString("F1") + "," + valB.ToString("F1") + ")");
                     ApplyRemoteReviveEvent(evtType, (PlayerId)playerIdByte, new Vector3(valA, valB, 0f));
                     break;
 
                 case LevelEventType.LevelReload:
                     if (_transport.Role == CoopRole.Client)
                     {
+                        CupheadCoopBootstrapper.Log("[CoopDiag] LevelOutcome: Client applying LevelReload (Retry) for level=" + (Levels)(int)valA + " (seed=" + intVal + ")");
+                        _remoteReadyForLevelId = -1;
                         SetIgnoreRemoteDeathWindow(2.5f);
                         _currentRngSeed = intVal;
                         SynchronizeBossPropertiesRng(_currentRngSeed);
@@ -3982,6 +6283,8 @@ namespace CupheadCoop
                             break;
                         }
 
+                        _wasSceneLoaderLoading = true;
+                        _ignoreClientSceneRequestUntilTime = Time.unscaledTime + 3.5f;
                         _applyingRemoteSceneLoad = true;
                         try
                         {
@@ -4259,14 +6562,19 @@ namespace CupheadCoop
 
             if (_transport.Role == CoopRole.Client && !string.IsNullOrEmpty(sceneName))
             {
-                bool isNewLoad = (loadSeq != 0) ? (loadSeq != _lastReceivedSceneLoadSeq) : (sceneName != _lastSyncedScene);
+                if (sceneName == "scene_slot_select" || sceneName == "scene_title" || sceneName == "scene_start")
+                    return;
+
+                string activeScene = SceneManager.GetActiveScene().name;
+                bool isNewLoad = (activeScene != sceneName)
+                    || ((loadSeq != 0) ? (loadSeq != _lastReceivedSceneLoadSeq) : (sceneName != _lastSyncedScene));
                 if (isNewLoad)
                 {
                     _lastReceivedSceneLoadSeq = loadSeq;
                     _lastSyncedScene = sceneName;
+                    _remoteReadyForLevelId = -1;
 
                     // If the Client itself requested this exact scene transition recently, don't reload it a second time!
-                    string activeScene = SceneManager.GetActiveScene().name;
                     if (activeScene == sceneName && _lastClientRequestedScene == sceneName && (Time.unscaledTime - _lastClientRequestTime) < 12.0f)
                     {
                         _lastClientRequestedScene = string.Empty;
@@ -4275,6 +6583,13 @@ namespace CupheadCoop
                         return;
                     }
 
+                    if (Map.Current != null)
+                    {
+                        SyncMapReturnPositionsFromActivePlayers();
+                    }
+
+                    _wasSceneLoaderLoading = true;
+                    _ignoreClientSceneRequestUntilTime = Time.unscaledTime + 3.5f;
                     _applyingRemoteSceneLoad = true;
                     try
                     {

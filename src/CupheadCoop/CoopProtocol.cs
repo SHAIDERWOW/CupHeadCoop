@@ -28,6 +28,11 @@ namespace CupheadCoop
         SceneRequest = 13,
         WorldSaveMirrorChunk = 14,
         MapLevelSelectSync = 15,
+        DialogueSync = 16,
+        EquipMenuSync = 17,
+        ShopStateSync = 18,
+        MausoleumGhostSync = 19,
+        EnemySync = 20,
         UdpAck = 250
     }
 
@@ -72,7 +77,8 @@ namespace CupheadCoop
         DjimmiActivated = 13,
         LevelReady = 14,
         PauseSync = 15,
-        MausoleumGhostParried = 16
+        MausoleumGhostParried = 16,
+        SpawnerTriggerSync = 17
     }
 
     public enum AchievementSyncKind : byte
@@ -99,7 +105,29 @@ namespace CupheadCoop
         IsChalice = 1 << 8,
         PlaneShrunk = 1 << 9,
         MapScene = 1 << 10,
-        PlaneScene = 1 << 11
+        PlaneScene = 1 << 11,
+        MapStationary = 1 << 12
+    }
+
+    public struct MausoleumGhostEntry
+    {
+        public int GhostId;
+        public byte GhostType;
+        public float PosX;
+        public float PosY;
+        public float AngleZ;
+        public float Speed;
+    }
+
+    public struct EnemySyncEntry
+    {
+        public int EnemyKey;
+        public int TypeHash;
+        public float PosX;
+        public float PosY;
+        public float Health;
+        public sbyte ScaleX;
+        public byte StateFlags;
     }
 
     public struct PlayerStatePacket
@@ -170,7 +198,7 @@ namespace CupheadCoop
     public static class CoopProtocol
     {
         public const uint ProtocolVersion = 2;
-        public const string ModVersion = "1.3.0";
+        public const string ModVersion = "1.3.2";
 
         public static byte[] BuildHandshake(
             uint epoch,
@@ -401,6 +429,113 @@ namespace CupheadCoop
                 bw.Write(hardModeDlc);
                 bw.Write(coinsP1);
                 bw.Write(coinsP2);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildDialogueSync(byte action, int dialogueId, float pointX, float p1TargetX, float p2TargetX)
+        {
+            using (MemoryStream ms = new MemoryStream(28))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)PacketType.DialogueSync);
+                bw.Write(action);
+                bw.Write(dialogueId);
+                bw.Write(pointX);
+                bw.Write(p1TargetX);
+                bw.Write(p2TargetX);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildEquipMenuSync(
+            bool isOpen,
+            byte playerId,
+            byte side,
+            byte backMode,
+            byte slot,
+            int frontIndex,
+            int backIndex,
+            bool readyAndWaiting,
+            int primaryWep,
+            int secondaryWep,
+            int superId,
+            int charmId)
+        {
+            using (MemoryStream ms = new MemoryStream(40))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)PacketType.EquipMenuSync);
+                bw.Write(isOpen);
+                bw.Write(playerId);
+                bw.Write(side);
+                bw.Write(backMode);
+                bw.Write(slot);
+                bw.Write(frontIndex);
+                bw.Write(backIndex);
+                bw.Write(readyAndWaiting);
+                bw.Write(primaryWep);
+                bw.Write(secondaryWep);
+                bw.Write(superId);
+                bw.Write(charmId);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildShopStateSync(byte playerId, byte shopState, int itemIndex, bool exitingShop)
+        {
+            using (MemoryStream ms = new MemoryStream(16))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)PacketType.ShopStateSync);
+                bw.Write(playerId);
+                bw.Write(shopState);
+                bw.Write(itemIndex);
+                bw.Write(exitingShop);
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildMausoleumGhostSync(MausoleumGhostEntry[] entries, int count)
+        {
+            int safeCount = (entries != null) ? Math.Min(count, entries.Length) : 0;
+            using (MemoryStream ms = new MemoryStream(8 + safeCount * 21))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)PacketType.MausoleumGhostSync);
+                bw.Write((ushort)safeCount);
+                for (int i = 0; i < safeCount; i++)
+                {
+                    bw.Write(entries[i].GhostId);
+                    bw.Write(entries[i].GhostType);
+                    bw.Write(entries[i].PosX);
+                    bw.Write(entries[i].PosY);
+                    bw.Write(entries[i].AngleZ);
+                    bw.Write(entries[i].Speed);
+                }
+                return ms.ToArray();
+            }
+        }
+
+        public static byte[] BuildEnemySync(bool isHostSnapshot, EnemySyncEntry[] entries, int count)
+        {
+            int safeCount = (entries != null) ? Math.Min(count, entries.Length) : 0;
+            using (MemoryStream ms = new MemoryStream(8 + safeCount * 22))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write((byte)PacketType.EnemySync);
+                bw.Write(isHostSnapshot);
+                bw.Write((ushort)safeCount);
+                for (int i = 0; i < safeCount; i++)
+                {
+                    bw.Write(entries[i].EnemyKey);
+                    bw.Write(entries[i].TypeHash);
+                    bw.Write(entries[i].PosX);
+                    bw.Write(entries[i].PosY);
+                    bw.Write(entries[i].Health);
+                    bw.Write(entries[i].ScaleX);
+                    bw.Write(entries[i].StateFlags);
+                }
                 return ms.ToArray();
             }
         }

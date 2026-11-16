@@ -29,10 +29,13 @@
 - **🔄 Sincronização Completa da Gameplay:**
   - **Portão de Início de Fase Sincronizado (`LevelReadyGate`):** Se o PC de um jogador carregar a fase antes do outro, a luta aguarda os dois terminarem a tela de loading para começar exatamente no mesmo milissegundo.
   - **Menu de Pause Visual Compartilhado (`PauseSync`):** Pausar ou despausar durante a fase ou no Mapa-Múndi abre e fecha o menu de pause visualmente nos dois computadores ao mesmo tempo.
-  - **Seleção de Fase e Dificuldade no Mapa (`MapLevelSelectSync`):** Quando qualquer jogador interage com uma fase no Mapa-Múndi, ambos veem a placa com o nome do chefe e o cursor de dificuldade (`Simple` / `Regular` / `Expert`) se movendo ao vivo.
-  - **Diálogos com NPCs e Ms. Chalice Sincronizados:** Reposiciona automaticamente o parceiro ao iniciar diálogos (Elder Kettle, Padaria do Saltbaker, Ms. Chalice no Mausoléu e Torre do Rei), sem travar o Jogador 1 esperando o Jogador 2 caminhar até o NPC.
-  - **Mausoléu Sincronizado:** Ondas de fantasmas e parries espelhados entre os dois jogadores, além de proteção contra "Game Over" falso na tela do Cliente.
-  - **Comandos Bidirecionais (`SceneRequestSync`):** Qualquer um dos dois jogadores (Host ou Player 2) pode dar *Retry/Restart* (com filtro contra o bug do "espírito invisível"), voltar ao Mapa ou iniciar fases pelo Mapa-Múndi. Voltar ao Menu Principal encerra a sala automaticamente.
+  - **Seleção de Fase e Dificuldade no Mapa (`MapLevelSelectSync`):** Quando qualquer jogador interage com uma fase no Mapa-Múndi, ambos veem a placa com o nome do chefe e o cursor de dificuldade (`Simple` / `Regular` / `Expert`) se movendo ao vivo (sem piscar a tela ao cancelar).
+  - **Menu de Equipamentos no Mapa (`EquipMenuSync`):** Abrir o menu de armas e habilidades abre para ambos os jogadores, exibe os itens equipados pelo Jogador 2, espelha rotações de carta e cursores em tempo real, aguarda os dois confirmarem para fechar e atualiza o barco da DLC pós-Mausoléu.
+  - **Loja do Porkrind Sincronizada (`ShopStateSync`):** Os dois jogadores navegam de forma independente na loja, e o jogo aguarda ambos apertarem Sair antes de voltar ao Mapa-Múndi.
+  - **Diálogos com NPCs e Ms. Chalice Sincronizados (`DialogueSync`):** Sincroniza abertura e fim dos diálogos nos dois PCs e posiciona ambos nas coordenadas exatas do mundo (Elder Kettle, Padaria do Saltbaker, Ms. Chalice no Mausoléu e Torre do Rei) sem travar movimentos.
+  - **Mausoléu Sincronizado (`MausoleumGhostSync`):** Fantasmas sincronizados pelo Host, parries espelhados entre os dois jogadores, cutscene de vitória da Ms. Chalice sincronizada no Cliente e proteção contra "Game Over" falso.
+  - **Sincronização de Inimigos em Run & Gun, Avião e Chefes (`EnemySync` & `SpawnerTriggerSync`):** Sincroniza gatilhos de spawners, posições, vida, mortes e dano em inimigos Run & Gun e invocações destruíveis (como as cenourinhas do Botânico Rebelde), além de tiros do Player 2 no avião após Retry.
+  - **Comandos Bidirecionais (`SceneRequestSync`):** Qualquer um dos dois jogadores (Host ou Player 2) pode dar *Retry/Restart* (com filtro contra o bug do "espírito invisível"), voltar ao Mapa ou iniciar fases pelo Mapa-Múndi. Voltar ao Menu Principal ou sair da sala zera movimentos residuais e fecha o lobby de forma limpa.
   - **Espelhamento do Mapa-Múndi em Memória RAM (`WorldSaveMirror`):** Sincroniza pontes abertas, bandeiras de chefes vencidos e diálogos de NPCs (`Dialoguer`) do Host na memória RAM do Cliente, **sem sobrescrever o arquivo de save pessoal do Cliente no HD**.
   - **Chefes, Propriedades e Trava de Knockout:** Vida real do chefe (`AbstractLevelProperties`), linha do tempo, mudanças de fase, semente aleatória (RNG) e anúncio de `KNOCKOUT!` (`LevelOutcomeSync`) 100% sincronizados.
   - **Fases Run & Gun:** Moedas (`LevelCoin`) coletadas por qualquer um dos jogadores são computadas para ambos (`5/5`).
@@ -55,7 +58,7 @@
 
 > **Observação:** Você e seu amigo precisam ter o jogo Cuphead original na Steam.
 
-1. Baixe o arquivo `CupheadCoop-v1.3.0.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) (ou no [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
+1. Baixe o arquivo `CupheadCoop-v1.3.2.zip` na página de [Releases](https://github.com/SHAIDERWOW/CupHeadCoop/releases) (ou no [Nexus Mods](https://www.nexusmods.com/cuphead/mods/219)).
 2. Extraia o conteúdo do arquivo `.zip` diretamente dentro da pasta de instalação do seu Cuphead:
    - Caminho padrão da Steam: `C:\Program Files (x86)\Steam\steamapps\common\Cuphead\`
 3. Verifique se os arquivos abaixo estão na pasta junto com o `Cuphead.exe`:

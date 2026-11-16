@@ -845,7 +845,8 @@ namespace CupheadCoop
                     typeof(DialogueInteractionPoint).GetField("playerTwoDialoguePosition", allFlags).SetValue(dip, new Vector2(45f, 0f));
 
                     bool snapped = Sync.MonitorActiveDialoguesAndInteractions(true);
-                    float expectedX = Sync.GetRemotePlayerId() == PlayerId.PlayerTwo ? 145f : 60f;
+                    // Issue #1 & #5 (v1.3.2): playerOneDialoguePosition and playerTwoDialoguePosition are WORLD X coordinates (-40f / 45f), NOT offsets from dip.transform.position.x (100f)!
+                    float expectedX = Sync.GetRemotePlayerId() == PlayerId.PlayerTwo ? 45f : -40f;
                     npcDialogueAutoPosVerified = snapped
                         && dip.interactor == AbstractLevelInteractiveEntity.Interactor.Either
                         && Mathf.Abs(remotePlayer.transform.position.x - expectedX) < 0.1f;
@@ -881,8 +882,73 @@ namespace CupheadCoop
                     && ghostParryPkt != null && ghostParryPkt.Length >= 15
                     && mapSelPkt != null && mapSelPkt.Length >= 10;
 
+                // 4. (v1.3.1): Map Player Position Normalization (anti-offscreen camera trap) & DLC Boatman Disabler
+                bool mapTetherAndBoatmanGuardVerified = false;
+                if (PlayerData.Initialized && PlayerData.Data != null)
+                {
+                    PlayerData.MapData md2 = PlayerData.Data.GetMapData(Scenes.scene_map_world_2);
+                    bool origStarted = md2.sessionStarted;
+                    Vector3 origP1 = md2.playerOnePosition;
+                    Vector3 origP2 = md2.playerTwoPosition;
+
+                    md2.sessionStarted = true;
+                    md2.playerOnePosition = new Vector3(-6f, 5f, 0f);
+                    md2.playerTwoPosition = new Vector3(38f, -24f, 0f); // Distant Boatman dock vs Funfair Fever
+                    bool normalized = CoopSyncController.NormalizeAllMapPlayerPositions();
+                    bool tetheredClose = Vector2.Distance(
+                        new Vector2(md2.playerOnePosition.x, md2.playerOnePosition.y),
+                        new Vector2(md2.playerTwoPosition.x, md2.playerTwoPosition.y)) < 1.5f;
+
+                    md2.sessionStarted = origStarted;
+                    md2.playerOnePosition = origP1;
+                    md2.playerTwoPosition = origP2;
+
+                    GameObject boatRoot = new GameObject("TestBoatman");
+                    GameObject boatEn = new GameObject("BoatmanEnable");
+                    GameObject boatDis = new GameObject("BoatmanDisable");
+                    boatEn.transform.SetParent(boatRoot.transform);
+                    boatDis.transform.SetParent(boatRoot.transform);
+                    boatEn.SetActive(true);
+                    boatDis.SetActive(false);
+
+                    BoatmanEnabler boatComp = boatRoot.AddComponent<BoatmanEnabler>();
+                    var bFlags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    typeof(MapLevelDependentObstacle).GetField("ToEnable", bFlags).SetValue(boatComp, boatEn);
+                    typeof(MapLevelDependentObstacle).GetField("ToDisable", bFlags).SetValue(boatComp, boatDis);
+
+                    int disabledBoats = CoopSyncController.DisableDlcBoatmanOnMap();
+                    bool boatDisabled = disabledBoats >= 1 && !boatEn.activeSelf && boatDis.activeSelf;
+                    DestroyImmediate(boatRoot);
+
+                    mapTetherAndBoatmanGuardVerified = normalized && tetheredClose && boatDisabled;
+                }
+
+                // 5. (v1.3.2): DialogueSync, EquipMenuSync, ShopStateSync, MausoleumGhostSync, EnemySync, Residual Motion Stop & Rich Context Logger
+                byte[] dlgSyncPkt = CoopProtocol.BuildDialogueSync(1, 10, 0f, -120f, -60f);
+                byte[] equipSyncPkt = CoopProtocol.BuildEquipMenuSync(true, 1, 1, 0, 2, 0, 1, false, (int)Weapon.level_weapon_peashot, 0, (int)Super.level_super_beam, 0);
+                byte[] shopSyncPkt = CoopProtocol.BuildShopStateSync(1, 5, 2, true);
+                MausoleumGhostEntry[] testGhosts = new MausoleumGhostEntry[]
+                {
+                    new MausoleumGhostEntry { GhostId = 101, GhostType = 1, PosX = 250f, PosY = 120f, AngleZ = 45f, Speed = 100f }
+                };
+                byte[] ghostSyncPkt = CoopProtocol.BuildMausoleumGhostSync(testGhosts, 1);
+                EnemySyncEntry[] testEnemies = new EnemySyncEntry[]
+                {
+                    new EnemySyncEntry { EnemyKey = 202, TypeHash = 12345, PosX = 300f, PosY = -50f, Health = 25f, ScaleX = 1, StateFlags = 1 }
+                };
+                byte[] enemySyncPkt = CoopProtocol.BuildEnemySync(true, testEnemies, 1);
+                string diagCtx = Sync.FormatSceneAndLevelContext("scene_map_world_1", (int)Levels.Veggies, (int)Level.Mode.Normal);
+                CoopSyncController.StopAllResidualPlayerMovement();
+
+                bool v132FixesVerified = dlgSyncPkt != null && dlgSyncPkt[0] == (byte)PacketType.DialogueSync
+                    && equipSyncPkt != null && equipSyncPkt[0] == (byte)PacketType.EquipMenuSync
+                    && shopSyncPkt != null && shopSyncPkt[0] == (byte)PacketType.ShopStateSync
+                    && ghostSyncPkt != null && ghostSyncPkt[0] == (byte)PacketType.MausoleumGhostSync
+                    && enemySyncPkt != null && enemySyncPkt[0] == (byte)PacketType.EnemySync
+                    && !string.IsNullOrEmpty(diagCtx) && diagCtx.Contains("Inkwell Isle I");
+
                 return string.Format(
-                    "{{\"ok\":true,\"pauseLeaveProtected\":{0},\"loadoutSynced\":{1},\"inventorySynced\":{2},\"kdPacketValid\":{3},\"eventsValid\":{4},\"levelReadyGateVerified\":{5},\"pauseSyncVerified\":{6},\"sceneRequestVerified\":{7},\"worldSaveMirrorVerified\":{8},\"dlcAndVersionGuardVerified\":{9},\"coldLaunchInviteVerified\":{10},\"autoReconnectVerified\":{11},\"knockoutGateVerified\":{12},\"localizationVerified\":{13},\"updateCheckParserVerified\":{14},\"mapBridgeRefreshVerified\":{15},\"noDeadPlayerCloneVerified\":{16},\"remoteDamageGuardAndDeathSyncVerified\":{17},\"bossPatternRngSyncVerified\":{18},\"richPresenceVerified\":{19},\"copyLogVerified\":{20},\"npcDialogueAutoPosVerified\":{21},\"staleDeathRetryGuardVerified\":{22},\"v130PacketsVerified\":{23}}}",
+                    "{{\"ok\":true,\"pauseLeaveProtected\":{0},\"loadoutSynced\":{1},\"inventorySynced\":{2},\"kdPacketValid\":{3},\"eventsValid\":{4},\"levelReadyGateVerified\":{5},\"pauseSyncVerified\":{6},\"sceneRequestVerified\":{7},\"worldSaveMirrorVerified\":{8},\"dlcAndVersionGuardVerified\":{9},\"coldLaunchInviteVerified\":{10},\"autoReconnectVerified\":{11},\"knockoutGateVerified\":{12},\"localizationVerified\":{13},\"updateCheckParserVerified\":{14},\"mapBridgeRefreshVerified\":{15},\"noDeadPlayerCloneVerified\":{16},\"remoteDamageGuardAndDeathSyncVerified\":{17},\"bossPatternRngSyncVerified\":{18},\"richPresenceVerified\":{19},\"copyLogVerified\":{20},\"npcDialogueAutoPosVerified\":{21},\"staleDeathRetryGuardVerified\":{22},\"v130PacketsVerified\":{23},\"mapTetherAndBoatmanGuardVerified\":{24},\"v132FixesVerified\":{25}}}",
                     pauseLeaveProtected ? "true" : "false",
                     loadoutSynced ? "true" : "false",
                     inventorySynced ? "true" : "false",
@@ -906,7 +972,9 @@ namespace CupheadCoop
                     copyLogVerified ? "true" : "false",
                     npcDialogueAutoPosVerified ? "true" : "false",
                     staleDeathRetryGuardVerified ? "true" : "false",
-                    v130PacketsVerified ? "true" : "false");
+                    v130PacketsVerified ? "true" : "false",
+                    mapTetherAndBoatmanGuardVerified ? "true" : "false",
+                    v132FixesVerified ? "true" : "false");
             }
             catch (Exception ex)
             {
@@ -1244,7 +1312,8 @@ namespace CupheadCoop
                 ? ("Cuphead Co-op Online v" + CoopProtocol.ModVersion + " + Conquistas Steam (F9)")
                 : ("Cuphead Online Co-op v" + CoopProtocol.ModVersion + " + Steam Achievements (F9)");
 
-            int boxHeight = _updateAvailable ? 485 : 445;
+            bool dlcLockedInSession = Transport.IsConnected && !Sync.BothPlayersHaveDlc;
+            int boxHeight = (_updateAvailable ? 485 : 445) + (dlcLockedInSession ? 22 : 0);
             GUI.Box(new Rect(12, 12, 435, boxHeight), title);
 
             // Language toggle pill in the top-right corner of the box (wider so "Idioma: Auto (PT)" never clips)
@@ -1275,6 +1344,7 @@ namespace CupheadCoop
                 pt ? "Papel: {0} | Conectado: {1} | Ping: {2:F0} ms" : "Role: {0} | Connected: {1} | Ping: {2:F0} ms",
                 roleLabel, connLabel, Transport.LastRttMs));
 
+            GUIStyle richLabelStyle = new GUIStyle(GUI.skin.label) { richText = true };
             string dlcStatus;
             if (!Transport.IsConnected)
             {
@@ -1289,13 +1359,25 @@ namespace CupheadCoop
             }
             else if (CoopSyncController.IsLocalDlcEnabled())
             {
-                dlcStatus = pt ? "Protecao Ativa (Parceiro sem DLC)" : "Guard Active (Partner lacks DLC)";
+                dlcStatus = pt
+                    ? "<color=#FF6B6B><b>[!]</b></color> Bloqueada (Parceiro sem DLC)"
+                    : "<color=#FF6B6B><b>[!]</b></color> Locked (Partner lacks DLC)";
             }
             else
             {
-                dlcStatus = pt ? "Desativada (Protecao Ativa)" : "Disabled (Guard Active)";
+                dlcStatus = pt
+                    ? "<color=#FF6B6B><b>[!]</b></color> Desativada (Apenas jogo base)"
+                    : "<color=#FF6B6B><b>[!]</b></color> Disabled (Base game only)";
             }
-            GUILayout.Label("DLC (Delicious Last Course): " + dlcStatus);
+            GUILayout.Label("DLC (Delicious Last Course): " + dlcStatus, richLabelStyle);
+
+            if (dlcLockedInSession)
+            {
+                string dlcLockExplain = pt
+                    ? "<color=#FF6B6B><b>[!]</b></color> Conteudo da DLC (Ilha IV, barco, armas, Chalice) bloqueado nesta sessao."
+                    : "<color=#FF6B6B><b>[!]</b></color> DLC content (Isle IV, boat, weapons, Chalice) locked this session.";
+                GUILayout.Label(dlcLockExplain, richLabelStyle);
+            }
 
             string achStatus = Sync.OnlineWrapper != null
                 ? string.Format(

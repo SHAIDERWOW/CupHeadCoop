@@ -260,10 +260,13 @@ def main() -> int:
         assert edge.get("npcDialogueAutoPosVerified") is True, "Expected NPC & Ms. Chalice Dialogue auto-positioning and Interactor.Either"
         assert edge.get("staleDeathRetryGuardVerified") is True, "Expected Retry stale death guard and invisible spirit self-healing"
         assert edge.get("v130PacketsVerified") is True, "Expected BossPhaseChange, MausoleumGhostParried, and MapLevelSelectSync packets valid"
+        assert edge.get("mapTetherAndBoatmanGuardVerified") is True, "Expected Map player position tether normalization and DLC Boatman disabler"
+        assert edge.get("v132FixesVerified") is True, "Expected v1.3.2 DialogueSync, EquipMenuSync, ShopStateSync, MausoleumGhostSync, EnemySync, and Rich Diagnostic Logger"
 
         with open(LOG_FILE, "r", encoding="utf-8") as lf:
             log_text = lf.read()
-        assert "[CupheadCoopV1.3.0]" in log_text, "Expected [CupheadCoopV1.3.0] version tag in CupheadCoop.log"
+        assert "[CupheadCoopV1.3.2]" in log_text, "Expected [CupheadCoopV1.3.2] version tag in CupheadCoop.log"
+        assert "[CoopDiag] SceneLoaded:" in log_text, "Expected [CoopDiag] SceneLoaded rich diagnostic log entry in CupheadCoop.log"
 
         print("RESULT: PASS")
         return 0
